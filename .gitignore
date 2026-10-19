@@ -1,0 +1,31 @@
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+*.spec
+build/
+dist/
+*.egg-info/
+
+# Recorded photos & videos
+output/*.jpg
+output/*.png
+output/*.mp4
+output/*.avi
+!output/.gitkeep
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Dynamic thumbnails (can be re-generated automatically)
+assets/thumbnails/*.png
+!assets/thumbnails/.gitkeep
