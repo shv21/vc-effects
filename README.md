@@ -8,40 +8,34 @@ Instead of conventional face-filter button clicking, this application uses **bot
 
 ## 🌟 Key Features
 
-- **Two-Hand Dynamic Region Control**:
-  - Uses index fingertips and thumbs of both hands to define an interactive 4-corner polygon (quadrilateral).
-  - Bringing hands closer shrinks the region; moving hands apart enlarges it.
-  - Repositions smoothly as hands translate across the camera frame.
-  - Exponential Moving Average (EMA) smoothing eliminates landmark jitter.
-  - Dual Pinch (thumb + index on both hands) toggles between **PREVIEW** (follows hands) and **LOCKED** (pinned in 3D screen space).
-  - Single-hand dropouts are handled gracefully without collapsing the region.
+- **Immersive Full-Screen AR Experience**:
+  - Edge-to-edge camera canvas with zero desktop dashboard clutter.
+  - Supports true full-screen mode (`F11`) and minimal, non-intrusive HUD notifications.
+  - Optional debug overlay (`D`) toggles landmarks and diagnostics on demand.
+- **Continuous Two-Hand Dynamic Region Control**:
+  - Uses index fingertips and thumbs of both hands to define an interactive 4-corner polygon (convex quadrilateral).
+  - Continuous real-time movement and resizing (hands closer = shrink, hands farther = enlarge).
+  - Convex hull sorting prevents twisted, self-intersecting quads even when hands tilt or cross.
+  - Exponential Moving Average (EMA) smoothing eliminates landmark jitter without lag.
+  - Single-hand/dual-hand tracking loss triggers a clean 0.4s grace period with smooth fadeout — **never leaves stale or frozen regions on screen**.
+  - Region remains live by default; explicit freeze via sustained fist gesture or `F` key.
 - **Strict Mask Confinement & Feathering**:
-  - The chosen visual transformation is applied **strictly inside** the hand-controlled polygon mask.
-  - The rest of the original webcam frame remains **100% untouched** (verified by pixel-difference testing).
-  - Configurable edge softness with Gaussian blur feathering and inside/outside inversion mode.
-- **100% Hands-Free Gesture Controls**:
-  - 👋 **Swipe Left / Right**: Rapid hand swipe switches to the previous or next visual effect.
-  - 🤏 **Dual Pinch**: Locks or unlocks the hand-controlled region in space.
-  - ✌️ **Peace / V-Sign**: Cycles between scene compositing modes (Modes A through E).
-  - ✋ **Open Palms**: Enters neutral dynamic tracking mode.
-  - ✊ **Fist**: Freezes the active region position.
-- **Multi-Layer Scene Compositing Engine**:
-  - **Layer 1 (Background)**: Virtual scene replacement from `assets/backgrounds/` (Cyberpunk City, Superhero Rooftop, Quantum Lab, Alien Skyline).
-  - **Layer 2 (Person)**: Live person silhouette extracted via MediaPipe Selfie Segmentation with temporal smoothing and halo reduction.
-  - **Layer 3 (Character / Costume)**: 2D superhero emblems, armor plates, or cyber visors anchored to body/face pose landmarks.
-  - **Layer 4 (Hand Polygon Effect)**: Interactive visual effect warped into the hand-defined polygon with 4-point perspective transformation (`cv2.warpPerspective`).
-- **5 Integrated Operating Modes**:
-  - **Mode A: Hand-Controlled Region** (Webcam untouched, effect applied only inside hand polygon).
-  - **Mode B: Background Replacement** (Room background replaced with virtual scene; person preserved).
-  - **Mode C: Background + Hand Effect** (Virtual background + person + interactive hand effect).
-  - **Mode D: Character Overlay** (Virtual background + person + costume overlay).
-  - **Mode E: Full Scene Interaction** (Background + character overlay + interactive hand portal/effect).
-- **Rich Procedural & Asset-Driven Effects**:
-  - Procedural: Magic Energy Portal, Spider-Web Zone, Cyber Matrix Grid, Cosmic Nebula, Thermal Heat Signature, Fire & Plasma Aura, Comic Halftone.
-  - Image Textures & Transparent PNGs: Auto-discovered from `assets/effects/` and `assets/textures/` and mapped using perspective warping.
-- **HD Snapshot & Asynchronous Video Recording**:
-  - One-touch photo snapshots with animated shutter flash.
-  - Queue-buffered asynchronous MP4 video recording for lag-free 30+ FPS preview.
+  - Hand effects are applied **strictly inside** the hand-controlled polygon mask.
+  - Outside pixels remain **100% untouched** (verified by pixel-difference testing).
+- **Face Mesh-Anchored Character Overlays**:
+  - MediaPipe Face Mesh extracts eye centers, face center, width, and in-plane head roll rotation angle.
+  - Masks and eye lens overlays rotate and scale dynamically with head movement.
+- **4 Precise Interaction Modes**:
+  - **MODE A — Local Effect**: Both hands control a polygon region; selected effect renders inside with feathered boundaries.
+  - **MODE B — Scene Portal**: Virtual background is warped directly into the hand-defined polygon with 4-point perspective transform (`cv2.warpPerspective`).
+  - **MODE C — Character Transformation**: Virtual background replaces the room (person segmented via Selfie Segmentation), and face/character overlay is anchored to face landmarks.
+  - **MODE D — Combined AR**: Full virtual background replacement + segmented person + character overlay + two hands controlling an active transformation portal/effect.
+- **Hands-Free Gesture Recognition**:
+  - 👋 **Swipe Left / Right**: Instant switch to previous or next visual effect.
+  - ✌️ **Peace / V-Sign**: Cycle through Modes A, B, C, and D.
+  - 🤏 **Dual Pinch**: Deliberate activation / fine-tuning gesture (keeps tracking live).
+  - ✊ **Fist (Hold)**: Deliberate region freeze/lock toggle.
+  - ✋ **Open Palms**: Re-engage live dynamic tracking.
 
 ---
 
@@ -59,22 +53,22 @@ spidermaneffect/
 │   ├── gestures.json           # Gesture recognition thresholds, hold times & cooldowns
 │   └── effects.json            # Effect configuration catalog, feathering & opacity
 ├── src/
-│   ├── __init__.py             # Package initializer (v2.0.0)
+│   ├── __init__.py             # Package initializer (v2.1.0)
 │   ├── camera.py               # DirectShow/OpenCV capture & real-time FPS engine
-│   ├── hand_tracker.py         # MediaPipe Hands dual-hand tracking & landmark extraction
+│   ├── hand_tracker.py         # Dual-hand tracking, screen-space horizontal assignment & EMA smoothing
 │   ├── gesture_recognizer.py   # Two-hand gesture recognition, swipe detection & debouncing
-│   ├── region_controller.py    # 4-corner polygon tracking, scale expansion & lock state machine
+│   ├── region_controller.py    # Convex quad sorting, scale expansion & tracking-loss grace fadeout
 │   ├── mask_renderer.py        # Strict alpha blending, feathered masking & glowing HUD outline
-│   ├── effect_manager.py       # Procedural shader-like effects & 4-point perspective warping
+│   ├── effect_manager.py       # Procedural effects & 4-point perspective warping
 │   ├── person_segmenter.py     # MediaPipe Selfie Segmentation with temporal halo reduction
-│   ├── background_compositor.py # Virtual background scene replacement
-│   ├── character_compositor.py # Pose-anchored costume emblems and cyber visors
+│   ├── background_compositor.py # Virtual background scene replacement & 4-point perspective scene portals
+│   ├── character_compositor.py # MediaPipe Face Mesh-anchored character overlays with head roll rotation
 │   ├── recorder.py             # Asynchronous MP4 video recorder & timestamped photo saver
-│   └── app.py                  # CustomTkinter desktop interface and event controller
+│   └── app.py                  # Immersive full-screen AR studio application
 ├── assets/
 │   ├── effects/                # Transparent PNG effect overlays (magic_portal, energy_shield, etc.)
 │   ├── backgrounds/            # Virtual background scenes (cyberpunk_city, superhero_rooftop, etc.)
-│   ├── characters/             # Character costume overlays (spider_emblem, cyber_visor, etc.)
+│   ├── characters/             # Character costume overlays (spiderman_mask, spiderman_eyes, etc.)
 │   └── textures/               # Background fill textures (web_lattice, halftone_dots, etc.)
 ├── output/                     # Saved photos (*.jpg) and recorded videos (*.mp4)
 └── tools/
@@ -128,12 +122,11 @@ python tools/test_pipeline.py
 ```
 
 All 6 test suites will run and verify:
-- Hand tracking metric extraction
-- Gesture recognition & debouncing
-- Region polygon resizing & persistence
+- Hand tracking metric extraction & dual-pinch stability
+- Continuous region resizing & tracking-loss grace cleanup (no freeze)
 - Strict pixel isolation (0 pixels altered outside mask)
 - Perspective warping
-- Background replacement & person preservation
+- Background replacement, 4-point scene portal & Face Mesh character compositing
 - Photo & video recording
 
 ### 5. Launch the Application
@@ -141,7 +134,7 @@ All 6 test suites will run and verify:
 ```powershell
 python main.py
 ```
-*(Or simply double-click `run.bat` or run `py main.py` / `py app.py` — automatic venv delegation is built-in!)*
+*(Or simply double-click `run.bat` or run `py main.py` — automatic venv delegation is built-in!)*
 
 ---
 
@@ -151,30 +144,28 @@ python main.py
 | :--- | :--- | :--- |
 | **Both Hands in View** | **Defines Active Region** | Animated cyan quadrilateral frames the area between hands |
 | **Move Hands Apart / Together** | **Enlarge / Shrink Region** | Region dynamically scales outward/inward |
-| **Dual Pinch** (Thumb + Index on both hands) | **Lock / Unlock Region** | Outline switches between Cyan (tracking) and Pulsing Green/Gold (pinned in space) |
 | **👋 Swipe Hand Right** | **Next Effect ▶** | Cycles to next visual effect (portal, web, matrix, cosmic, etc.) |
 | **👋 Swipe Hand Left** | **◀ Previous Effect** | Cycles to previous visual effect |
-| **✌️ Peace / V-Sign** | **Cycle Scene Mode** | Cycles through Mode A → Mode B → Mode C → Mode D → Mode E |
-| **✋ Open Palms** | **Dynamic Follow** | Unlocks region to follow hands |
-| **✊ Fist** | **Freeze Region** | Freezes region coordinates in place |
+| **✌️ Peace / V-Sign** | **Cycle Scene Mode** | Cycles through Mode A → Mode B → Mode C → Mode D |
+| **✊ Fist (Hold)** | **Toggle Freeze / Lock** | Freezes region coordinates in place (unfreezes on open hands) |
+| **✋ Open Palms** | **Dynamic Follow** | Resumes live tracking |
 
 ---
 
 ## ⌨️ Accessibility & Debugging Keyboard Shortcuts
 
-While the studio is designed for hands-free interaction, keyboard shortcuts are available:
-
 | Shortcut | Action |
 | :--- | :--- |
-| `◀` / `▶` Left / Right Arrow | Cycle to Previous / Next Effect |
+| `F11` | Toggle Full-Screen Mode |
+| `D` / `d` | Toggle Debug Mode (Landmarks, Hand Skeletons, Face Mesh & Diagnostics) |
 | `Spacebar` | Capture Photo Snapshot (with white shutter flash) |
 | `R` / `r` | Start / Stop Video Recording |
-| `M` / `m` | Cycle Scene Mode (Mode A → B → C → D → E) |
+| `M` / `m` | Cycle Scene Mode (Mode A → B → C → D) |
 | `B` / `b` | Cycle Virtual Background Scene |
 | `C` / `c` | Cycle Character Costume Overlay |
-| `L` / `l` | Toggle Region Lock |
+| `F` / `f` | Toggle Region Freeze / Lock |
 | `I` / `i` | Invert Mask (Inside / Outside Effect) |
-| `D` / `d` | Toggle Hand Landmark Skeleton Overlay |
+| `◀` / `▶` Left / Right Arrow | Cycle to Previous / Next Effect |
 | `F5` | Reload all assets from disk |
 | `ESC` | Exit Studio cleanly |
 
@@ -223,7 +214,7 @@ The application processes frames through a decoupled 4-stage pipeline:
          │     │ (Composited using Person Silhouette Mask)        │
          │  Layer 2: Live Segmented Person                        │
          │     ▲                                                  │
-         │     │ (Anchored via Pose Landmarks)                    │
+         │     │ (Anchored via MediaPipe Face Mesh + Head Roll)                    │
          │  Layer 3: Character Costume / Visor Overlay            │
          │     ▲                                                  │
          │     │ (Restricted strictly to Hand Polygon Mask)       │
@@ -231,7 +222,7 @@ The application processes frames through a decoupled 4-stage pipeline:
          └────────────────────────────────────────────────────────┘
                      │
                      ▼
-         [HUD Telemetry & Output Preview (Canvas / Photo / Video)]
+         [Minimal Immersive Viewport (Canvas / Photo / Video)]
 ```
 
 ### 2D Layered Compositing vs. 3D Retargeting

@@ -52,7 +52,7 @@ except ImportError as err:
 from src.camera import Camera
 from src.effect_manager import EffectManager
 from src.background_compositor import BackgroundCompositor
-from src.app import GestureARStudioApp
+from src.app import ImmersiveARStudioApp
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -140,17 +140,22 @@ def main() -> None:
             print(f"  [{idx:02d}] {p.stem.replace('_', ' ').title()} ({p.name})")
         return
 
-    print("Launching Gesture-Controlled AR Studio...")
+    print("Launching Immersive Gesture AR Studio...")
     print(f"Camera index: {args.camera}")
     print(f"Output folder: {args.output}")
     print("\nPrimary Hands-Free Gestures:")
     print("  👋 Swipe Right / Left : Next / Previous Effect")
-    print("  🤏 Dual Pinch         : Lock / Unlock Region")
-    print("  ✌️  Peace / V-Sign     : Cycle Scene Mode (A -> B -> C -> D -> E)")
-    print("  ✋ Open Palms         : Dynamic Region Follow")
-    print("  ✊ Fist               : Freeze Region Position\n")
+    print("  ✌️  Peace / V-Sign     : Cycle AR Mode (Mode A -> B -> C -> D)")
+    print("  ✊ Fist               : Toggle Freeze Region Position")
+    print("  ✋ Open Palms         : Live Dynamic Follow")
+    print("\nShortcuts:")
+    print("  [F11]   : Toggle Fullscreen")
+    print("  [D]     : Toggle Debug Telemetry")
+    print("  [Space] : Snapshot Photo")
+    print("  [R]     : Start/Stop Video Recording")
+    print("  [Esc]   : Exit\n")
 
-    app = GestureARStudioApp(camera_index=args.camera, output_dir=args.output)
+    app = ImmersiveARStudioApp(camera_index=args.camera, output_dir=args.output)
     app.run()
 
 
