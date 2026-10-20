@@ -1,162 +1,183 @@
-# ⚡ Gesture-Controlled AR Studio: Hand-Defined Effects & Scene Transformation
+# 🌀 Two-Hand-Controlled Full-Scene AR Portal
 
-A real-time, hands-free Augmented Reality desktop studio built in Python using **OpenCV**, **MediaPipe (Hands, Selfie Segmentation, Face Mesh)**, **NumPy**, and **CustomTkinter**.
-
-Instead of conventional face-filter button clicking, this application uses **both hands** to dynamically control where visual effects appear, how large the affected region is, which effect is active, and how the background and character appearance change.
+A high-performance, real-time Augmented Reality application built in Python using **OpenCV**, **MediaPipe (Hands, Selfie Segmentation, Face Mesh)**, **NumPy**, and **CustomTkinter**.
 
 ---
 
-## 🌟 Key Features
+## 🌟 What is the Full-Scene AR Portal?
 
-- **Immersive Full-Screen AR Experience**:
-  - Edge-to-edge camera canvas with zero desktop dashboard clutter.
-  - Supports true full-screen mode (`F11` or `F`) and minimal, non-intrusive HUD notifications.
-  - Skeletons, polygon outlines, and telemetry are **hidden by default** in clean presentation mode and can be toggled on demand with Debug Mode (`D`).
-- **Continuous Two-Hand Dynamic Region Control**:
-  - Uses the thumb tips and index fingertips of both hands to define an interactive 4-corner polygon (convex quadrilateral).
-  - Continuous real-time movement and resizing (hands closer = shrink, hands farther = enlarge).
-  - Clockwise convex sorting prevents twisted, self-intersecting quads even when hands tilt or cross.
-  - Orientation-adaptive span maintains stable geometry under any hand tilt.
-  - Velocity-adaptive Exponential Moving Average (EMA) smoothing eliminates landmark jitter without lag.
-  - Tracking loss triggers a clean 0.4s grace period with smooth fadeout — **never leaves stale or frozen regions on screen**.
-  - **Live tracking by default**: Region follows hands continuously unless the user deliberately presses `L` to lock.
-- **Strict Mask Confinement & Feathering**:
-  - Hand effects are applied **strictly inside** the hand-controlled polygon mask.
-  - Outside pixels remain **100% untouched** (verified by pixel-difference testing).
-- **Face Mesh-Anchored Character Overlays**:
-  - MediaPipe Face Mesh extracts eye centers, face center, width, and in-plane head roll rotation angle.
-  - Masks and eye lens overlays rotate and scale dynamically with head movement.
-  - Supports full Spider-Man masks, classic eye lenses, web overlays, iron hero faceplates, visors, and chest emblems.
-- **4 Precise Interaction Modes**:
-  - **MODE A — Local Effect**: Both hands control a polygon region; selected visual effect renders inside with feathered boundaries. Outside is 100% original webcam feed.
-  - **MODE B — Scene Portal**: Virtual background is warped directly into the hand-defined polygon with 4-point perspective transform (`cv2.warpPerspective`). Outside is 100% original webcam feed.
-  - **MODE C — Character Transformation**: Virtual background replaces the room (person segmented via Selfie Segmentation), and character overlay is anchored to facial landmarks.
-  - **MODE D — Combined AR**: Full virtual background replacement + segmented person + character overlay + two hands controlling an active transformation portal/effect.
-- **Hands-Free Gesture Recognition**:
-  - 👋 **Swipe Left / Right**: Instant switch to previous or next visual effect.
-  - ✌️ **Peace / V-Sign**: Cycle through Modes A, B, C, and D.
-  - 🤏 **Dual Pinch**: Deliberate activation / fine-tuning gesture (keeps tracking live).
-  - ✋ **Open Palms**: Re-engage live dynamic tracking.
+This is **NOT a face filter** and **NOT full-screen background replacement**.
+
+The user selects a complete scene image that contains **BOTH a character and a background** (for example, an anime character in a black hoodie inside a modern building, a superhero on a city rooftop, or a fantasy warrior in a glowing shrine).
+
+When the user presents both hands to the webcam:
+- The **ENTIRE selected scene image** (character + background) appears perspective-warped **strictly inside the region enclosed by the hands**.
+- Outside the hand-defined region, the original live webcam video remains **100% UNCHANGED** (exact pixel isolation).
+- Moving your hands moves the entire scene portal in real time.
+- Spreading your hands apart enlarges the portal.
+- Bringing your hands closer shrinks it.
+- Moving individual fingertips alters the portal's shape.
+- When the activation gesture is released or tracking is lost, the portal disappears smoothly without freezing at old coordinates.
 
 ---
 
-## 📁 Project Architecture
+## 🖐️ Hand Control & 4-Point Geometry
 
-```
-spidermaneffect/
-├── main.py                     # CLI launcher & desktop application entry point
-├── app.py                      # Root convenience forwarding entry point (auto venv delegation)
-├── run.bat                     # Windows double-click launcher
-├── requirements.txt            # Pinned, mutually compatible Python dependencies
-├── README.md                   # Complete documentation, setup & gesture guide
-├── .gitignore                  # Git exclusions for environments, outputs & caches
-├── config/
-│   ├── gestures.json           # Gesture recognition thresholds, hold times & cooldowns
-│   └── effects.json            # Effect configuration catalog, feathering & opacity
-├── src/
-│   ├── __init__.py             # Package initializer
-│   ├── camera.py               # DirectShow/OpenCV capture & real-time FPS engine
-│   ├── hand_tracker.py         # Dual-hand tracking, spatial continuity & adaptive EMA smoothing
-│   ├── gesture_recognizer.py   # Two-hand gesture recognition, swipe detection & debouncing
-│   ├── region_controller.py    # Convex quad sorting, scale expansion & tracking-loss grace fadeout
-│   ├── mask_renderer.py        # Strict alpha blending, feathered masking & glowing HUD outline
-│   ├── effect_manager.py       # Procedural effects & 4-point perspective warping
-│   ├── person_segmenter.py     # MediaPipe Selfie Segmentation with temporal halo reduction
-│   ├── background_compositor.py # Virtual background scene replacement & 4-point perspective portals
-│   ├── character_compositor.py # MediaPipe Face Mesh-anchored character overlays with head roll rotation
-│   ├── recorder.py             # Asynchronous MP4 video recorder & timestamped photo saver
-│   └── app.py                  # Immersive full-screen AR studio application
-├── assets/
-│   ├── effects/                # Transparent PNG effect overlays (magic_portal, energy_shield, etc.)
-│   ├── backgrounds/            # Virtual background scenes (cyberpunk_city, superhero_rooftop, etc.)
-│   ├── characters/             # Character costume overlays (spiderman_mask, spiderman_eyes, etc.)
-│   └── textures/               # Background fill textures (web_lattice, halftone_dots, etc.)
-├── output/                     # Saved photos (*.jpg) and recorded videos (*.mp4)
-└── tools/
-    ├── create_assets.py        # Procedural asset generator for high-res images across all 4 categories
-    └── test_pipeline.py        # Automated 7-suite verification test script
-```
+1. **MediaPipe Hand Landmark Tracking**:
+   - Detects both hands in every frame in mirrored camera coordinates.
+   - Extracts four live control points from the **Thumb tips** and **Index fingertips** of the Left and Right hands.
+2. **Topological Corner Ordering `[TL, TR, BR, BL]`**:
+   - Computes the inter-hand axis and normal vector to guarantee Top-Left, Top-Right, Bottom-Right, and Bottom-Left assignments remain invariant under rotation or tilt.
+   - Prevents self-intersecting or twisted (bowtie) polygons.
+3. **Pinch & Framing Geometry**:
+   - When pinching, an anatomical span expands around the pinch point to prevent the quad from collapsing into a 2-point line, allowing users to "hold" the portal between two pinches.
+   - When framing (fingers open), the 4 fingertips directly define the 4 corners of the quad.
+4. **Configurable Activation Gesture Rules**:
+   - **`dual_pinch`** *(Default)*: Both hands pinching thumb and index finger activates and maintains the portal. Releasing pinch closes the portal.
+   - **`framing`**: Both hands framing with thumb and index fingers extended activates the portal.
+   - **`both_hands`**: Any two hands in view activate the portal.
+   - Cycle gesture rules on the fly with the **`[G]`** key.
+5. **Low-Latency Adaptive Filtering**:
+   - Velocity-adaptive EMA smoothing eliminates landmark jitter while stationary and delivers zero lag during rapid hand movements.
+   - Instant reacquisition with zero drift when hands return to view.
 
 ---
 
-## 🚀 Installation & Quick Start (Windows PowerShell)
+## 🖼️ Complete Scene Images & Loading (`assets/scenes/`)
 
-### 1. Launch the Application
+The application discovers all `.jpg`, `.jpeg`, `.png`, and `.webp` images in `assets/scenes/`:
 
-You can launch using any of these commands:
+| Scene Image | Description | Format |
+| :--- | :--- | :--- |
+| `anime_hoodie_building.jpg` | Anime character wearing a black hoodie in a modern building with floor-to-ceiling glass | JPEG (1280x720) |
+| `superhero_city.jpg` | Superhero standing on a rooftop overlooking a vibrant dusk city skyline | JPEG (1280x720) |
+| `fantasy_portal.jpg` | Mage / Warrior character in an ancient stone shrine with glowing runes | JPEG (1280x720) |
+| `solo_leveling.jpg` | Full character standing in dramatic fantasy environment | JPEG (736x1308) |
+| `cyber_warrior.png` | Cybernetic character with semi-transparent tech arena (Alpha Channel) | PNG RGBA (1280x720) |
 
+### Image Fit Modes (Toggle with `[A]`):
+- **`CROP`** *(Default)*: Preserves source aspect ratio by center-cropping margins. Fills the portal without black bars while keeping the character visible.
+- **`LETTERBOX`**: Preserves aspect ratio by padding margins with black borders. The entire image is visible inside the portal.
+- **`STRETCH`**: Directly maps the 4 image corners to the 4 hand control points.
+
+### Loading Custom Images:
+- **Drop files directly**: Add any `.jpg`, `.jpeg`, `.png`, or `.webp` into `assets/scenes/` and press **`[F5]`** to reload.
+- **Open File Dialog**: Press **`[O]`** anytime to open a standard file browser and select any image on your computer.
+
+---
+
+## 🔒 Strict Pixel Isolation (Requirement 3)
+
+1. The live camera frame is the base image.
+2. The complete scene is warped into a separate image using `cv2.warpPerspective`.
+3. A single-channel mask is created strictly from the hand-controlled quadrilateral polygon.
+4. The warped scene is composited onto the camera frame using this mask.
+5. Outside the polygon mask (with edge feathering disabled), **the camera frame is 100% mathematically unchanged** (max difference = 0).
+
+---
+
+## 🖥️ Minimal Interface (Requirement 7)
+
+- **Edge-to-Edge Clean Presentation**:
+  - Fullscreen compatible (`F11` or `F`).
+  - No large telemetry dashboards or header panels.
+  - Skeletons, landmark dots, polygon outlines, and FPS counters are **hidden by default**.
+- **Debug Mode (`[D]`)**:
+  - Toggles hand skeletons, corner nodes (`TL`, `TR`, `BR`, `BL`), polygon boundary outlines, and live FPS diagnostics on demand.
+- **Subtle On-Screen Guidance**:
+  - Non-intrusive instruction pill at bottom appears only when hands are not in view.
+  - Floating toast notifications appear briefly on scene or mode switches and automatically fade out.
+
+---
+
+## ⌨️ Keyboard Shortcuts
+
+| Key | Action | Description |
+| :--- | :--- | :--- |
+| **`S`** / **`▶`** | **Next Scene** | Cycles to next complete scene in `assets/scenes/` |
+| **`◀`** | **Previous Scene** | Cycles to previous scene in `assets/scenes/` |
+| **`A`** | **Cycle Fit Mode** | Cycles through `Crop` (fill) → `Letterbox` → `Stretch` |
+| **`G`** | **Cycle Gesture Rule** | Cycles through `Dual Pinch` → `Framing` → `Both Hands` |
+| **`O`** | **Open Custom Scene** | Opens file dialog to load any local image from disk |
+| **`F5`** | **Reload Scenes** | Re-scans `assets/scenes/` for newly added files |
+| **`D`** | **Toggle Debug Mode** | Shows/hides hand landmarks, corner labels & FPS |
+| **`F11`** / **`F`** | **Toggle Fullscreen** | Fills screen edge-to-edge |
+| **`Space`** | **Snapshot Photo** | Saves high-res photo to `output/` with shutter flash |
+| **`R`** | **Record Video** | Starts / stops video recording to `output/` |
+| **`L`** | **Toggle Lock / Freeze** | Explicitly locks portal in place or resumes live tracking |
+| **`1`** – **`4`** | **Select AR Mode** | Jump to Mode 1 (Portal), 2 (Effect), 3 (Character), 4 (Combined) |
+| **`M`** | **Cycle AR Mode** | Cycles through available interaction modes |
+| **`Esc`** | **Exit** | Exits fullscreen or closes application |
+
+---
+
+## 🚀 Running the Application
+
+### 1. Launch with Default Settings (Full-Scene Portal Mode)
 ```powershell
-# Using the root app.py (automatically detects and uses the venv)
-py app.py
-
-# Or using main.py
+# Using the automatic venv launcher
 py main.py
 
 # Or run directly via venv python
 .\venv\Scripts\python.exe main.py
-
-# Or double-click run.bat in File Explorer
-.\run.bat
 ```
 
-### 2. Run Automated Verification Tests
+### 2. Launch Options & CLI Flags
+```powershell
+# Select a specific webcam index
+python main.py --camera 1
 
-Verify all 7 test suites (tracking, resizing, isolation, warping, segmentation, overlays, recording):
+# Launch with a specific activation gesture rule
+python main.py --activation pinch      # Dual pinch to activate (default)
+python main.py --activation framing    # Frame with spread fingers to activate
+python main.py --activation both       # Any 2 hands activate immediately
 
+# List discovered scenes in assets/scenes/
+python main.py --list-scenes
+
+# Discover connected webcam indices
+python main.py --scan-cameras
+```
+
+---
+
+## 🧪 Automated Testing
+
+### Run Comprehensive Test Suite:
 ```powershell
 .\venv\Scripts\python.exe tools/test_pipeline.py
 ```
+This runs 10 automated test suites verifying:
+1. Four-point extraction from thumb & index fingertips of both hands.
+2. Live portal position updates & continuous translation follow.
+3. Portal dynamic resizing (hands apart = enlarge, hands close = shrink).
+4. Corner ordering and OpenCV perspective transformation.
+5. Degenerate & self-intersecting polygon handling (safely hides portal, 0 crashes).
+6. Scene switching, in-memory caching, reloading, and fit modes (`Crop`, `Letterbox`, `Stretch`).
+7. RGBA alpha transparency preservation inside the portal.
+8. Strict pixel isolation (guaranteed 0 altered pixels outside the polygon).
+9. Tracking loss cleanup (grace period fadeout, 0 stale freeze) & instant reacquisition.
+10. Configurable gesture activation rules (`dual_pinch`, `framing`, `both_hands`).
+
+### Run End-to-End Integration Suite:
+```powershell
+.\venv\Scripts\python.exe tools/test_integration.py
+```
 
 ---
 
-## 🖐️ Hands-Free Gesture Interaction Guide
+## 📹 Manual Webcam Testing Steps
 
-| Gesture | Action | Visual Feedback |
-| :--- | :--- | :--- |
-| **Both Hands in View** | **Defines Active Region** | Animated quadrilateral frames the area between hands |
-| **Move Hands Apart / Together** | **Enlarge / Shrink Region** | Region dynamically scales outward/inward |
-| **Move Hands Up / Down / Across** | **Follows Hand Position** | Region moves smoothly with hands in real time |
-| **👋 Swipe Hand Right** | **Next Effect ▶** | Cycles to next visual effect |
-| **👋 Swipe Hand Left** | **◀ Previous Effect** | Cycles to previous visual effect |
-| **✌️ Peace / V-Sign** | **Cycle Scene Mode** | Cycles through Mode A → Mode B → Mode C → Mode D |
-| **✋ Open Palms** | **Dynamic Follow** | Resumes live tracking |
-
----
-
-## ⌨️ Accessibility & Controls Keyboard Shortcuts
-
-| Shortcut | Action | Description |
-| :--- | :--- | :--- |
-| `F11` / `F` | **Toggle Fullscreen** | Expands canvas edge-to-edge |
-| `D` | **Toggle Debug Mode** | Shows/hides hand skeletons, polygon outlines, and FPS diagnostics |
-| `1`, `2`, `3`, `4` | **Select Mode** | Selects Mode A, B, C, or D directly |
-| `M` | **Cycle Mode** | Cycles Mode A → B → C → D |
-| `◀` / `▶` Left / Right | **Previous / Next Effect** | Cycles through active visual effects / textures |
-| `N` / `P` | **Next / Prev Effect** | Alternative effect navigation |
-| `B` | **Next Scene Background** | Cycles through virtual environments (rooftop, city, lab, etc.) |
-| `C` | **Next Character Mask** | Cycles through face masks (Spider-Man, Eyes, Iron Hero, Visor, etc.) |
-| `L` | **Toggle Lock / Freeze** | Explicitly freezes region in place or resumes live tracking |
-| `Spacebar` | **Capture Snapshot** | Saves high-res photo to `output/` with shutter flash |
-| `R` | **Record Video** | Starts / stops recording video to `output/` |
-| `F5` | **Reload Assets** | Re-scans `assets/` folders for newly added images |
-| `ESC` | **Exit** | Exits fullscreen or closes application cleanly |
-
----
-
-## 🐛 Root Causes of Previous Bugs & Fixes Implemented
-
-1. **Accidental Locking Bug (Frozen Region)**:
-   - *Cause*: In `gesture_recognizer.py`, any relaxed hand with curled fingers was classified as a `FIST`, which triggered `toggle_freeze`. Once frozen, `region_controller.py` returned static coordinates on every frame, ignoring new hand movements. Furthermore, `config/gestures.json` previously mapped `dual_pinch` to `toggle_lock_region`.
-   - *Fix*: Removed automatic freeze triggers from relaxed hand movement. Mapped `dual_pinch` to live continuous control. Made region locking an **explicit user command** (`L` key), ensuring tracking remains live by default.
-2. **Hand Track Cross-Wiring**:
-   - *Cause*: Sorting hands purely by horizontal position caused identity flips when hands crossed or when one hand moved across the screen center, blending smoothed history across different hands.
-   - *Fix*: Implemented spatial track continuity in `hand_tracker.py` with Euclidean distance association, maintaining consistent tracking history for each hand.
-3. **Display Scaling Typo**:
-   - *Cause*: In `app.py`, `scale = min(cw / fw, ch / ch)` had a typo (`ch / ch = 1.0`), preventing the video canvas from scaling up to fill the window in fullscreen mode.
-   - *Fix*: Corrected to `scale = min(cw / fw, ch / fh)` with aspect-ratio preserving window fill.
-4. **Interface Dashboard Clutter**:
-   - *Cause*: Heavy header bars, outlines, and diagnostic skeletons were displayed constantly.
-   - *Fix*: Replaced with a pure, immersive AR presentation. Polygon outlines, skeletons, and telemetry are hidden by default and only visible when Debug Mode (`D`) is active.
-5. **Person Transformation (Mode C & Mode D)**:
-   - *Cause*: Face overlays and backgrounds were previously disconnected from hand interactions.
-   - *Fix*: Integrated 4-layer compositing: virtual background, segmented person silhouette, Face Mesh-anchored character masks with roll angle rotation, and hand-controlled transformation portals.
+If running with a physical webcam:
+1. Launch the app: `.\venv\Scripts\python.exe main.py`
+2. Bring both hands in front of the camera.
+3. **Pinch**: Touch thumb and index finger on your left hand, and thumb and index finger on your right hand.
+4. Observe the complete scene image (e.g. anime character in building) appear warped between your hands.
+5. Move your hands wider apart: the portal enlarges.
+6. Bring your hands closer: the portal shrinks.
+7. Move your hands up, down, left, right: the portal follows your hands smoothly.
+8. Release the pinch: the portal cleanly deactivates/fades out. Notice the camera pixels outside the portal were completely unchanged.
+9. Press **`S`** to cycle to the next scene (e.g. superhero city, fantasy shrine).
+10. Press **`A`** to switch fit modes (`Crop` -> `Letterbox` -> `Stretch`).
+11. Press **`D`** to inspect the 4 corner landmarks (`TL`, `TR`, `BR`, `BL`) and FPS telemetry.
+12. Press **`Esc`** to exit.

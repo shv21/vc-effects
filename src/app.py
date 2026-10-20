@@ -1,13 +1,15 @@
 """
-Immersive Full-Screen AR Studio Application.
-Provides a clean, edge-to-edge camera experience where hands directly
-control the visual transformation without dashboard clutter.
+Two-Hand-Controlled Full-Scene AR Portal Application.
+Provides an edge-to-edge camera experience where the user's two hands
+directly frame and control a perspective-warped scene containing both character and background.
 
 Modes:
-- MODE A: Local Effect (Only pixels inside hand polygon transform)
-- MODE B: Scene Portal (Virtual scene appears perspective-warped inside hand polygon)
-- MODE C: Character Transformation (Virtual background + segmented user + face mask / costume overlay)
-- MODE D: Combined AR (Full background + character transformation + hand-controlled portal/energy zone)
+- MODE 1: FULL-SCENE AR PORTAL (Default)
+  Displays complete user-selected image (character + background) strictly inside the hand quadrilateral.
+  Webcam video outside the polygon remains 100% unchanged.
+- MODE 2: LOCAL EFFECT (Procedural energy zones inside hand region)
+- MODE 3: CHARACTER TRANSFORMATION (Optional advanced mode)
+- MODE 4: COMBINED AR (Optional advanced mode)
 """
 
 import os
@@ -21,12 +23,13 @@ import numpy as np
 from PIL import Image, ImageTk
 
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 
 from .camera import Camera
 from .hand_tracker import HandTracker, DualHandData
 from .gesture_recognizer import GestureRecognizer, GestureResult
-from .region_controller import RegionController
+from .region_controller import RegionController, ActivationGestureRule
+from .scene_manager import ScenePortalManager, AspectRatioFitMode
 from .mask_renderer import MaskRenderer
 from .effect_manager import EffectManager
 from .person_segmenter import PersonSegmenter
@@ -38,25 +41,44 @@ logger = logging.getLogger(__name__)
 
 
 class ARMode:
-    MODE_A = "MODE A: LOCAL EFFECT"
-    MODE_B = "MODE B: SCENE PORTAL"
-    MODE_C = "MODE C: CHARACTER TRANSFORMATION"
-    MODE_D = "MODE D: COMBINED AR"
+    SCENE_PORTAL = "MODE 1: FULL-SCENE AR PORTAL"
+    LOCAL_EFFECT = "MODE 2: LOCAL EFFECT"
+    CHARACTER_TRANSFORM = "MODE 3: CHARACTER TRANSFORMATION"
+    COMBINED_AR = "MODE 4: COMBINED AR"
 
-    ALL = [MODE_A, MODE_B, MODE_C, MODE_D]
+    ALL = [SCENE_PORTAL, LOCAL_EFFECT, CHARACTER_TRANSFORM, COMBINED_AR]
 
 
 class ImmersiveARStudioApp:
-    """Full-screen immersive AR studio window with gesture and hand control."""
+    """Full-screen immersive AR studio window with two-hand-controlled scene portal."""
 
-    def __init__(self, camera_index: int = 0, output_dir: str = "output") -> None:
+    def __init__(
+        self,
+        camera_index: int = 0,
+        output_dir: str = "output",
+        scenes_dir: str = "assets/scenes",
+        activation_rule: str = ActivationGestureRule.DUAL_PINCH
+    ) -> None:
         self.output_dir = str(Path(output_dir).resolve())
 
-        # Core Computer Vision Pipeline (initialized once)
+        # Core Computer Vision Pipeline
         self.camera = Camera(device_index=camera_index, width=640, height=480, fps=30)
-        self.hand_tracker = HandTracker(max_num_hands=2, base_smoothing_alpha=0.78)
+        self.hand_tracker = HandTracker(max_num_hands=2, base_smoothing_alpha=0.82)
         self.gesture_recognizer = GestureRecognizer()
-        self.region_controller = RegionController(feather_radius=21, smoothing_alpha=0.82)
+        self.region_controller = RegionController(
+            feather_radius=0,
+            smoothing_alpha=0.85,
+            activation_rule=activation_rule
+        )
+
+        # Full-Scene AR Portal Engine (Requirement 1, 2, 3, 4)
+        self.scene_manager = ScenePortalManager(
+            scenes_dir=scenes_dir,
+            default_fit_mode=AspectRatioFitMode.CROP,
+            feather_radius=0
+        )
+
+        # Supporting and optional mode modules
         self.effect_manager = EffectManager(effects_dir="assets/effects", textures_dir="assets/textures")
         self.person_segmenter = PersonSegmenter(model_selection=0)
         self.background_compositor = BackgroundCompositor(backgrounds_dir="assets/backgrounds")
@@ -64,7 +86,7 @@ class ImmersiveARStudioApp:
         self.recorder = VideoRecorder(output_dir=self.output_dir)
 
         # State
-        self.current_mode_idx = 0
+        self.current_mode_idx = 0  # Mode 1: Full-Scene AR Portal by default
         self.is_debug_mode = False
         self.is_fullscreen = False
         self.shutter_flash_frames = 0
@@ -72,12 +94,13 @@ class ImmersiveARStudioApp:
         self.latest_frame: Optional[np.ndarray] = None
 
         # Floating toast notification
-        self.toast_message: str = "Show both hands to begin"
-        self.toast_expires_at: float = time.time() + 3.5
+        active_scene_name = self.scene_manager.get_active_scene_name()
+        self.toast_message: str = f"Scene Portal: {active_scene_name}"
+        self.toast_expires_at: float = time.time() + 3.0
 
-        # Build clean full-screen compatible window
+        # Build clean window
         self.root = ctk.CTk()
-        self.root.title("Spider-Man AR Studio - Gesture-Controlled Augmented Reality")
+        self.root.title("Two-Hand Scene Portal AR Studio")
         self.root.geometry("1280x720")
         self.root.minsize(800, 600)
         self.root.configure(fg_color="#000000")
@@ -102,28 +125,34 @@ class ImmersiveARStudioApp:
         self.root.bind("<F>", lambda e: self.toggle_fullscreen())
         self.root.bind("<d>", lambda e: self.toggle_debug())
         self.root.bind("<D>", lambda e: self.toggle_debug())
+
+        # Scene controls
+        self.root.bind("<s>", lambda e: self.next_scene())
+        self.root.bind("<S>", lambda e: self.next_scene())
+        self.root.bind("<Right>", lambda e: self.next_scene())
+        self.root.bind("<Left>", lambda e: self.prev_scene())
+        self.root.bind("<a>", lambda e: self.cycle_fit_mode())
+        self.root.bind("<A>", lambda e: self.cycle_fit_mode())
+        self.root.bind("<g>", lambda e: self.cycle_gesture_rule())
+        self.root.bind("<G>", lambda e: self.cycle_gesture_rule())
+        self.root.bind("<o>", lambda e: self.open_custom_scene())
+        self.root.bind("<O>", lambda e: self.open_custom_scene())
+        self.root.bind("<F5>", lambda e: self.reload_assets())
+
+        # Mode controls
         self.root.bind("<m>", lambda e: self.cycle_mode())
         self.root.bind("<M>", lambda e: self.cycle_mode())
         self.root.bind("1", lambda e: self.set_mode(0))
         self.root.bind("2", lambda e: self.set_mode(1))
         self.root.bind("3", lambda e: self.set_mode(2))
         self.root.bind("4", lambda e: self.set_mode(3))
-        self.root.bind("<Right>", lambda e: self.next_effect())
-        self.root.bind("<Left>", lambda e: self.prev_effect())
-        self.root.bind("<n>", lambda e: self.next_effect())
-        self.root.bind("<N>", lambda e: self.next_effect())
-        self.root.bind("<p>", lambda e: self.prev_effect())
-        self.root.bind("<P>", lambda e: self.prev_effect())
-        self.root.bind("<b>", lambda e: self.next_background())
-        self.root.bind("<B>", lambda e: self.next_background())
-        self.root.bind("<c>", lambda e: self.next_character())
-        self.root.bind("<C>", lambda e: self.next_character())
+
+        # Capture & lock
         self.root.bind("<space>", lambda e: self.capture_photo())
         self.root.bind("<r>", lambda e: self.toggle_recording())
         self.root.bind("<R>", lambda e: self.toggle_recording())
         self.root.bind("<l>", lambda e: self.toggle_lock())
         self.root.bind("<L>", lambda e: self.toggle_lock())
-        self.root.bind("<F5>", lambda e: self.reload_assets())
 
     def start_camera(self) -> None:
         self.is_camera_running = self.camera.start()
@@ -143,34 +172,64 @@ class ImmersiveARStudioApp:
         if 0 <= mode_idx < len(ARMode.ALL):
             self.current_mode_idx = mode_idx
             mode = ARMode.ALL[self.current_mode_idx]
-            self.set_toast(f"Switched: {mode}", duration=2.2)
+            self.set_toast(f"Mode: {mode}", duration=2.0)
 
     def cycle_mode(self) -> None:
         self.current_mode_idx = (self.current_mode_idx + 1) % len(ARMode.ALL)
         mode = ARMode.ALL[self.current_mode_idx]
-        self.set_toast(f"Switched: {mode}", duration=2.2)
+        self.set_toast(f"Mode: {mode}", duration=2.0)
 
-    def next_effect(self) -> None:
-        eff = self.effect_manager.next_effect()
-        if eff:
-            self.set_toast(f"Effect: {eff.display_name}")
+    def next_scene(self) -> None:
+        name = self.scene_manager.next_scene()
+        idx = self.scene_manager.active_index + 1
+        total = max(1, self.scene_manager.get_scene_count())
+        self.set_toast(f"Scene [{idx}/{total}]: {name} (Fit: {self.scene_manager.fit_mode.upper()})")
 
-    def prev_effect(self) -> None:
-        eff = self.effect_manager.prev_effect()
-        if eff:
-            self.set_toast(f"Effect: {eff.display_name}")
+    def prev_scene(self) -> None:
+        name = self.scene_manager.prev_scene()
+        idx = self.scene_manager.active_index + 1
+        total = max(1, self.scene_manager.get_scene_count())
+        self.set_toast(f"Scene [{idx}/{total}]: {name} (Fit: {self.scene_manager.fit_mode.upper()})")
 
-    def next_background(self) -> None:
-        bg = self.background_compositor.next_background()
-        self.set_toast(f"Scene: {bg}")
+    def cycle_fit_mode(self) -> None:
+        mode = self.scene_manager.cycle_fit_mode()
+        self.set_toast(f"Image Fit Mode: {mode}")
 
-    def next_character(self) -> None:
-        char = self.character_compositor.next_character()
-        self.set_toast(f"Character Overlay: {char}")
+    def cycle_gesture_rule(self) -> None:
+        rule = self.region_controller.cycle_activation_rule()
+        labels = {
+            ActivationGestureRule.DUAL_PINCH: "Dual Pinch (Thumb & Index pinch)",
+            ActivationGestureRule.FRAMING: "Framing (Index & Thumb spread)",
+            ActivationGestureRule.BOTH_HANDS: "Both Hands (Always active)"
+        }
+        self.set_toast(f"Gesture Rule: {labels.get(rule, rule)}")
+
+    def open_custom_scene(self) -> None:
+        """Opens standard Windows file dialog to load user-provided scene image."""
+        try:
+            file_path = filedialog.askopenfilename(
+                title="Select Scene Image (Character and Background)",
+                filetypes=[
+                    ("Image files", "*.jpg;*.jpeg;*.png;*.webp"),
+                    ("JPEG files", "*.jpg;*.jpeg"),
+                    ("PNG files", "*.png"),
+                    ("All files", "*.*")
+                ]
+            )
+            if file_path:
+                success = self.scene_manager.load_custom_scene(file_path)
+                if success:
+                    name = self.scene_manager.get_active_scene_name()
+                    self.set_toast(f"Loaded User Scene: {name}")
+                else:
+                    err = self.scene_manager.last_load_error or "Failed to load image"
+                    self.set_toast(f"Error: {err}", duration=3.5)
+        except Exception as e:
+            logger.warning(f"File dialog error: {e}")
 
     def toggle_lock(self) -> None:
         locked = self.region_controller.toggle_freeze()
-        self.set_toast("🔒 Region LOCKED in place" if locked else "🔓 Region LIVE: Following hands")
+        self.set_toast("🔒 Portal LOCKED in place" if locked else "🔓 Portal LIVE: Following hands")
 
     def toggle_debug(self) -> None:
         self.is_debug_mode = not self.is_debug_mode
@@ -192,11 +251,11 @@ class ImmersiveARStudioApp:
         if self.is_camera_running:
             ret, frame = self.camera.read_frame()
             if ret and frame is not None:
-                # Mirror webcam horizontally for intuitive mirror view
+                # Mirror webcam horizontally for intuitive mirror reflection
                 frame = cv2.flip(frame, 1)
                 h, w = frame.shape[:2]
 
-                # 1. Track Hands continuously (in mirrored camera coordinates)
+                # 1. Track Hands continuously in mirrored camera coordinates
                 dual: DualHandData = self.hand_tracker.process(frame)
 
                 # 2. Recognize Gestures & Dispatch Hands-Free Actions
@@ -204,7 +263,7 @@ class ImmersiveARStudioApp:
                 if g_res.action_triggered:
                     self._dispatch_gesture_action(g_res.action_triggered)
 
-                # 3. Update Hand-Controlled Region Polygon continuously from fresh landmarks
+                # 3. Update 4-point portal quadrilateral continuously from fresh landmarks
                 poly_pts = self.region_controller.update(dual, (h, w))
 
                 # 4. Multi-Layer AR Compositing
@@ -212,13 +271,26 @@ class ImmersiveARStudioApp:
                 composited = self._render_mode_pipeline(frame, poly_pts, active_mode)
 
                 # 5. Visual Overlays: ONLY in Debug Mode!
-                # (Normal mode presents clean AR output without polygon lines or skeletons)
+                # Normal mode presents clean AR output without polygon lines or skeletons
                 if self.is_debug_mode:
                     composited = self.hand_tracker.draw_debug_hands(composited, dual)
                     if poly_pts is not None and self.region_controller.is_active():
                         composited = MaskRenderer.draw_region_outline(
                             composited, poly_pts, state="LOCKED" if self.region_controller.is_frozen else "PREVIEW"
                         )
+                        # Draw Corner Identifiers (TL, TR, BR, BL) in debug mode
+                        corner_labels = ["TL", "TR", "BR", "BL"]
+                        for idx, pt in enumerate(poly_pts):
+                            cv2.putText(
+                                composited,
+                                f"{corner_labels[idx]} ({int(pt[0])},{int(pt[1])})",
+                                (int(pt[0]) + 8, int(pt[1]) - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.38,
+                                (0, 255, 255),
+                                1,
+                                cv2.LINE_AA
+                            )
 
                 # Shutter Flash Feedback
                 if self.shutter_flash_frames > 0:
@@ -246,44 +318,51 @@ class ImmersiveARStudioApp:
         poly_pts: Optional[np.ndarray],
         mode: str
     ) -> np.ndarray:
-        """Executes the specific compositing logic for Modes A, B, C, D."""
+        """Executes the specific compositing logic for active AR mode."""
         h, w = frame_bgr.shape[:2]
 
-        if mode == ARMode.MODE_A:
-            # MODE A: Local Effect (Only pixels inside hand polygon transform; outside is 100% original webcam)
+        if mode == ARMode.SCENE_PORTAL:
+            # MODE 1 (Primary / Default): Two-Hand-Controlled Full-Scene AR Portal
+            # The entire user-selected image (character + background) appears inside the hand polygon.
+            # Outside the polygon, original live webcam video remains 100% UNCHANGED.
+            if poly_pts is not None and self.region_controller.is_active():
+                return self.scene_manager.render_portal(
+                    base_frame_bgr=frame_bgr,
+                    polygon_pts=poly_pts,
+                    opacity=self.region_controller.current_opacity,
+                    feather_radius=0
+                )
+            return frame_bgr
+
+        elif mode == ARMode.LOCAL_EFFECT:
+            # MODE 2: Local Effect (Only pixels inside hand polygon transform)
             if poly_pts is not None and self.region_controller.is_active():
                 effect_frame = self.effect_manager.render_effect_frame(frame_bgr, poly_pts)
                 mask = self.region_controller.generate_mask((h, w))
                 return MaskRenderer.apply_masked_effect(frame_bgr, effect_frame, mask, opacity=0.96)
             return frame_bgr
 
-        elif mode == ARMode.MODE_B:
-            # MODE B: Scene Portal (Virtual scene appears warped inside hand polygon; outside is 100% original webcam)
-            if poly_pts is not None and self.region_controller.is_active():
-                portal_frame = self.background_compositor.render_portal_frame(frame_bgr, poly_pts)
-                mask = self.region_controller.generate_mask((h, w))
-                return MaskRenderer.apply_masked_effect(frame_bgr, portal_frame, mask, opacity=0.98)
-            return frame_bgr
-
-        elif mode == ARMode.MODE_C:
-            # MODE C: Character Transformation (Virtual background + live person + face/costume overlay)
+        elif mode == ARMode.CHARACTER_TRANSFORM:
+            # MODE 3: Optional Character Transformation (Virtual background + segmented person + costume)
             person_mask = self.person_segmenter.segment(frame_bgr)
             scene = self.background_compositor.composite_full(frame_bgr, person_mask)
             self.character_compositor.is_enabled = True
-            # Pass original frame for pristine face landmark detection
             return self.character_compositor.composite(scene, raw_frame_for_detection=frame_bgr)
 
-        elif mode == ARMode.MODE_D:
-            # MODE D: Combined AR (Background replaced + character overlay + hand-controlled portal/energy zone)
+        elif mode == ARMode.COMBINED_AR:
+            # MODE 4: Optional Combined AR
             person_mask = self.person_segmenter.segment(frame_bgr)
             scene = self.background_compositor.composite_full(frame_bgr, person_mask)
             self.character_compositor.is_enabled = True
             scene = self.character_compositor.composite(scene, raw_frame_for_detection=frame_bgr)
 
             if poly_pts is not None and self.region_controller.is_active():
-                effect_frame = self.effect_manager.render_effect_frame(scene, poly_pts)
-                mask = self.region_controller.generate_mask((h, w))
-                return MaskRenderer.apply_masked_effect(scene, effect_frame, mask, opacity=0.95)
+                scene = self.scene_manager.render_portal(
+                    base_frame_bgr=scene,
+                    polygon_pts=poly_pts,
+                    opacity=self.region_controller.current_opacity,
+                    feather_radius=0
+                )
             return scene
 
         return frame_bgr
@@ -303,10 +382,12 @@ class ImmersiveARStudioApp:
         # 1. Top-Right: Tiny Unobtrusive Tracking Dot
         dot_x = w - 24
         dot_y = 24
-        if dual.both_hands_visible:
-            dot_col = (0, 230, 100)  # Green: 2 hands active
+        if self.region_controller.is_active():
+            dot_col = (0, 230, 100)  # Green: Portal actively tracking
+        elif dual.both_hands_visible:
+            dot_col = (0, 200, 255)  # Yellow: Both hands ready
         elif dual.hands_count == 1:
-            dot_col = (0, 200, 255)  # Yellow: 1 hand active
+            dot_col = (70, 150, 255)  # Orange: 1 hand active
         else:
             dot_col = (70, 70, 100)  # Dim: looking for hands
 
@@ -320,43 +401,51 @@ class ImmersiveARStudioApp:
             cv2.rectangle(hud, (w - 145, 12), (w - 40, 36), (15, 15, 20), -1)
             cv2.putText(hud, rec_str, (w - 138, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1, cv2.LINE_AA)
 
-        # 3. Minimal Instruction Pill (shown ONLY when hands are not in view)
-        if not dual.both_hands_visible:
-            if dual.hands_count == 0:
-                prompt_text = "👋 Show both hands to control AR region"
+        # 3. Minimal Instruction Pill (shown ONLY when hands / portal are not active)
+        if not self.region_controller.is_active():
+            rule = self.region_controller.activation_rule
+            if rule == ActivationGestureRule.DUAL_PINCH:
+                if not dual.both_hands_visible:
+                    prompt_text = "Show both hands and pinch thumb & index to open portal"
+                else:
+                    prompt_text = "Pinch thumb & index on both hands to open portal"
+            elif rule == ActivationGestureRule.FRAMING:
+                prompt_text = "Frame with both hands (thumb & index spread) to open portal"
             else:
-                prompt_text = "👋 Show other hand to frame active region"
+                prompt_text = "Show both hands to open scene portal"
 
-            tw = len(prompt_text) * 9 + 30
-            tx1 = (w - tw) // 2
+            tw = len(prompt_text) * 8 + 32
+            tx1 = max(10, (w - tw) // 2)
             ty1 = h - 46
-            # Translucent dark pill
             overlay_box = hud.copy()
             cv2.rectangle(overlay_box, (tx1, ty1), (tx1 + tw, ty1 + 28), (15, 18, 24), -1)
             cv2.rectangle(overlay_box, (tx1, ty1), (tx1 + tw, ty1 + 28), (60, 70, 90), 1)
             hud = cv2.addWeighted(overlay_box, 0.75, hud, 0.25, 0)
-            cv2.putText(hud, prompt_text, (tx1 + 15, ty1 + 19), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 225, 235), 1, cv2.LINE_AA)
+            cv2.putText(hud, prompt_text, (tx1 + 16, ty1 + 19), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 225, 235), 1, cv2.LINE_AA)
 
         # 4. Floating Toast Notification (fades out automatically)
         if now < self.toast_expires_at:
             alpha = min(1.0, (self.toast_expires_at - now) / 0.4)
-            tw = len(self.toast_message) * 10 + 36
-            tx1 = (w - tw) // 2
+            tw = len(self.toast_message) * 9 + 36
+            tx1 = max(10, (w - tw) // 2)
             ty1 = 20
             toast_overlay = hud.copy()
             cv2.rectangle(toast_overlay, (tx1, ty1), (tx1 + tw, ty1 + 32), (12, 16, 24), -1)
             cv2.rectangle(toast_overlay, (tx1, ty1), (tx1 + tw, ty1 + 32), (0, 215, 255), 1)
             hud = cv2.addWeighted(toast_overlay, 0.85 * alpha, hud, 1.0 - (0.85 * alpha), 0)
-            cv2.putText(hud, self.toast_message, (tx1 + 18, ty1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(hud, self.toast_message, (tx1 + 18, ty1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1, cv2.LINE_AA)
 
-        # 5. Debug Mode Overlay (ONLY when debug mode is enabled)
+        # 5. Debug Mode Overlay (ONLY when debug mode is enabled via 'D')
         if self.is_debug_mode:
             fps = self.camera.get_fps()
-            debug_info = f"DEBUG | FPS: {fps:.1f} | Mode: {mode.split(':')[0]} | Gesture: {g_res.primary_gesture}"
+            scene_name = self.scene_manager.get_active_scene_name()
+            fit = self.scene_manager.fit_mode.upper()
+            rule = self.region_controller.activation_rule
+            debug_info = f"DEBUG | FPS: {fps:.1f} | Scene: {scene_name} | Fit: {fit} | Rule: {rule}"
             if self.region_controller.is_frozen:
                 debug_info += " | [LOCKED]"
             cv2.rectangle(hud, (0, 0), (w, 24), (20, 25, 35), -1)
-            cv2.putText(hud, debug_info, (12, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 200), 1, cv2.LINE_AA)
+            cv2.putText(hud, debug_info, (12, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 200), 1, cv2.LINE_AA)
 
         return hud
 
@@ -387,9 +476,15 @@ class ImmersiveARStudioApp:
     def _dispatch_gesture_action(self, action: str) -> None:
         """Hands-free gesture action execution."""
         if action == "next_effect":
-            self.next_effect()
+            if self.current_mode_idx == 0:
+                self.next_scene()
+            else:
+                self.effect_manager.next_effect()
         elif action == "prev_effect":
-            self.prev_effect()
+            if self.current_mode_idx == 0:
+                self.prev_scene()
+            else:
+                self.effect_manager.prev_effect()
         elif action == "cycle_scene_mode":
             self.cycle_mode()
 
@@ -418,10 +513,11 @@ class ImmersiveARStudioApp:
                 self.set_toast(f"🎬 Video Saved: {Path(path_or_err).name} ({dur:.1f}s)")
 
     def reload_assets(self) -> None:
+        count = self.scene_manager.reload()
         self.effect_manager.reload()
         self.background_compositor.reload()
         self.character_compositor.reload()
-        self.set_toast("All Assets Reloaded from Disk!")
+        self.set_toast(f"Reloaded {count} Scenes from Disk!")
 
     def on_closing(self) -> None:
         logger.info("Releasing AR Studio resources...")

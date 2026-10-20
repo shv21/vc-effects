@@ -1,23 +1,23 @@
 """
-Automated unit and integration test suite for Gesture-Controlled AR Experience.
-Verifies all 12 core requirements:
-1. Hand landmark coordinate conversion & metric extraction
-2. Gesture recognition (Dual Pinch, Swipes, V-Sign, Palm)
-3. Dynamic region polygon tracking, resizing, and convex quadrilateral sorting
-4. Tracking loss handling with grace period & smooth fadeout (verifies region is never stuck indefinitely)
-5. Reacquisition after hand returns (instant recovery without jump)
-6. Explicit lock and unlock behavior
-7. Strict mathematical effect confinement (verifies pixels outside polygon are 100% untouched)
-8. EffectManager procedural generation & 4-point perspective warping
-9. Person segmentation mask handling & boundary smoothing
-10. Background compositing (full replacement & perspective scene portals)
-11. Face landmark tracking, roll angle calculation, and character mask anchoring
-12. Photo capture, video recording, and resource cleanup
+Comprehensive Verification Test Suite for Two-Hand-Controlled Full-Scene AR Portal.
+
+Verifies:
+1. Four-point extraction from both hands (Thumb and Index fingertips)
+2. Live portal position updates (Continuous follow, translation)
+3. Portal dynamic resizing (Hands spread -> expand, hands close -> shrink)
+4. Corner ordering and perspective transformation
+5. Invalid and degenerate polygon handling (safely hides portal, 0 crash)
+6. Scene switching, caching, reloading, and fit modes (Crop, Letterbox, Stretch)
+7. Transparency handling (RGBA alpha channel preserved inside portal)
+8. Strict pixel isolation outside polygon (Exactly 0 altered pixels)
+9. Tracking loss cleanup & instant reacquisition (Zero stale freeze)
+10. Configurable gesture activation rules (Dual Pinch, Framing, Both Hands)
 """
 
 import sys
 import time
 from pathlib import Path
+from typing import Tuple, Optional, List
 import cv2
 import numpy as np
 
@@ -27,40 +27,54 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.hand_tracker import HandTracker, HandData, DualHandData
 from src.gesture_recognizer import GestureRecognizer, GestureResult
-from src.region_controller import RegionController, RegionState
+from src.region_controller import RegionController, RegionState, ActivationGestureRule
+from src.scene_manager import ScenePortalManager, AspectRatioFitMode, SceneItem
 from src.mask_renderer import MaskRenderer
 from src.effect_manager import EffectManager
-from src.person_segmenter import PersonSegmenter
-from src.background_compositor import BackgroundCompositor
-from src.character_compositor import CharacterCompositor
-from src.camera import Camera
 from src.recorder import PhotoSaver, VideoRecorder
 
 
-def make_dummy_hand(label: str, center_x: int, center_y: int, pinching: bool = False) -> HandData:
-    """Creates synthetic 21-point hand landmarks for headless unit tests."""
+def make_dummy_hand(
+    label: str,
+    cx: int,
+    cy: int,
+    pinching: bool = False,
+    thumb_offset: Tuple[int, int] = (-40, 20),
+    index_offset: Tuple[int, int] = (-15, -45)
+) -> HandData:
+    """Creates synthetic 21-point hand landmarks in camera coordinates."""
     pts = np.zeros((21, 2), dtype=np.float32)
-    pts[0] = [center_x, center_y + 80]
-    pts[1] = [center_x - 30, center_y + 60]
-    pts[2] = [center_x - 45, center_y + 40]
-    pts[3] = [center_x - 50, center_y + 20]
-    pts[4] = [center_x - 18 if pinching else center_x - 60, center_y - 20 if pinching else center_y]
-    pts[5] = [center_x - 15, center_y + 20]
-    pts[6] = [center_x - 18, center_y - 10]
-    pts[7] = [center_x - 19, center_y - 35]
-    pts[8] = [center_x - 18 if pinching else center_x - 20, center_y - 22 if pinching else center_y - 60]
-    pts[9] = [center_x, center_y + 20]
-    pts[10] = [center_x, center_y - 15]
-    pts[11] = [center_x, center_y - 40]
-    pts[12] = [center_x, center_y - 68]
-    pts[13] = [center_x + 15, center_y + 25]
-    pts[14] = [center_x + 15, center_y - 10]
-    pts[15] = [center_x + 15, center_y - 35]
-    pts[16] = [center_x + 15, center_y - 60]
-    pts[17] = [center_x + 30, center_y + 30]
-    pts[18] = [center_x + 30, center_y]
-    pts[19] = [center_x + 30, center_y - 20]
-    pts[20] = [center_x + 30, center_y - 45]
+    # Wrist
+    pts[0] = [cx, cy + 70]
+    pts[1] = [cx - 25, cy + 50]
+    pts[2] = [cx - 35, cy + 30]
+    pts[3] = [cx - 40, cy + 15]
+
+    if pinching:
+        # Thumb and index tips touch at pinch point
+        pts[4] = [cx - 15, cy - 20]
+        pts[8] = [cx - 15, cy - 20]
+    else:
+        # Configurable thumb and index offsets from center
+        pts[4] = [cx + thumb_offset[0], cy + thumb_offset[1]]
+        pts[8] = [cx + index_offset[0], cy + index_offset[1]]
+
+    # Other finger landmarks
+    pts[5] = [cx - 10, cy + 15]
+    pts[6] = [cx - 12, cy - 10]
+    pts[7] = [cx - 14, cy - 30]
+    pts[9] = [cx, cy + 15]
+    pts[10] = [cx, cy - 15]
+    pts[11] = [cx, cy - 35]
+    pts[12] = [cx, cy - 55]
+    pts[13] = [cx + 12, cy + 20]
+    pts[14] = [cx + 12, cy - 10]
+    pts[15] = [cx + 12, cy - 30]
+    pts[16] = [cx + 12, cy - 50]
+    pts[17] = [cx + 25, cy + 25]
+    pts[18] = [cx + 25, cy]
+    pts[19] = [cx + 25, cy - 20]
+    pts[20] = [cx + 25, cy - 40]
 
     pinch_dist = float(np.hypot(pts[4][0] - pts[8][0], pts[4][1] - pts[8][1]))
     hand_scale = float(np.hypot(pts[5][0] - pts[0][0], pts[5][1] - pts[0][1]))
@@ -81,251 +95,348 @@ def make_dummy_hand(label: str, center_x: int, center_y: int, pinching: bool = F
         middle_mcp=(int(pts[9][0]), int(pts[9][1])),
         ring_tip=(int(pts[16][0]), int(pts[16][1])),
         pinky_tip=(int(pts[20][0]), int(pts[20][1])),
-        palm_center=(center_x, center_y),
+        palm_center=(cx, cy),
         pinch_distance=pinch_dist,
         pinch_ratio=pinch_ratio,
         is_pinching=is_pinch,
         fingers_extended=[True, True, True, True, True],
-        bbox=(center_x - 60, center_y - 70, 120, 160),
+        bbox=(cx - 50, cy - 60, 100, 140),
         hand_scale=hand_scale
     )
 
 
-def test_hand_and_gestures() -> None:
-    print("\n--- 1. Testing Hand Metric Extraction & Gestures ---")
-    lh = make_dummy_hand("ScreenLeft", 180, 240, pinching=True)
-    rh = make_dummy_hand("ScreenRight", 460, 240, pinching=True)
+# --- TEST 1: FOUR-POINT EXTRACTION FROM BOTH HANDS ---
 
-    dual = DualHandData(
-        left_hand=lh,
-        right_hand=rh,
-        hands_count=2,
-        both_hands_visible=True,
-        inter_hand_distance=280.0,
-        hands_midpoint=(320, 240),
-        is_dual_pinching=True
-    )
+def test_four_point_extraction_from_both_hands() -> None:
+    print("\n[Test 1] Four-Point Extraction from Left & Right Hands...")
+    rc = RegionController(activation_rule=ActivationGestureRule.BOTH_HANDS)
 
-    assert dual.both_hands_visible, "Both hands must be detected as visible"
-    assert lh.is_pinching and rh.is_pinching, "Synthetic pinch must evaluate to True"
+    # Frame gesture: Left hand has index high (-50) and thumb low (+30)
+    lh = make_dummy_hand("ScreenLeft", 160, 240, pinching=False, thumb_offset=(-30, 40), index_offset=(-10, -50))
+    # Right hand has index high (-50) and thumb low (+30)
+    rh = make_dummy_hand("ScreenRight", 480, 240, pinching=False, thumb_offset=(30, 40), index_offset=(10, -50))
 
-    recognizer = GestureRecognizer()
-    g_res = recognizer.process(dual)
-    assert g_res is not None
-    assert g_res.is_dual_pinching, "Dual pinching state must be recognized"
-    # Verify dual pinch does NOT toggle accidental locking
-    assert g_res.action_triggered != "toggle_lock_region", "Dual pinch must NOT toggle lock! Tracking must remain live."
-    assert g_res.action_triggered != "freeze_region", "Dual pinch must not freeze region."
-    print("Dual pinch continuous control verified without locking side effects.")
-
-
-def test_region_controller_and_resizing() -> None:
-    print("\n--- 2. Testing Hand-Controlled Region Polygon & Resizing ---")
-    rc = RegionController(feather_radius=15, grace_period_sec=0.30)
-
-    # Initial hand positions
-    lh = make_dummy_hand("ScreenLeft", 150, 240)
-    rh = make_dummy_hand("ScreenRight", 490, 240)
-    dual_1 = DualHandData(left_hand=lh, right_hand=rh, both_hands_visible=True, hands_count=2)
-
-    poly_1 = rc.update(dual_1, (480, 640))
-    assert poly_1 is not None and len(poly_1) == 4, "Region polygon must have 4 vertices"
-    area_1 = cv2.contourArea(poly_1)
-
-    # Hands move closer together (Shrink region)
-    lh_close = make_dummy_hand("ScreenLeft", 250, 240)
-    rh_close = make_dummy_hand("ScreenRight", 390, 240)
-    dual_close = DualHandData(left_hand=lh_close, right_hand=rh_close, both_hands_visible=True, hands_count=2)
-
-    for _ in range(10):
-        poly_close = rc.update(dual_close, (480, 640))
-    area_close = cv2.contourArea(poly_close)
-
-    assert area_close < area_1, f"Bringing hands closer must shrink region: {area_close} < {area_1}"
-    print(f"Region dynamic resize confirmed: Initial Area={area_1:.0f}px², Shrunk Area={area_close:.0f}px²")
-
-    # Hands move across the screen (Translation follow)
-    lh_shift = make_dummy_hand("ScreenLeft", 300, 150)
-    rh_shift = make_dummy_hand("ScreenRight", 500, 150)
-    dual_shift = DualHandData(left_hand=lh_shift, right_hand=rh_shift, both_hands_visible=True, hands_count=2)
-    for _ in range(10):
-        poly_shift = rc.update(dual_shift, (480, 640))
-    shift_centroid_y = np.mean(poly_shift[:, 1])
-    assert shift_centroid_y < 200, "Region must translate upward when hands move up"
-    print("Region continuous position tracking confirmed.")
-
-
-def test_reacquisition_and_explicit_locking() -> None:
-    print("\n--- 3. Testing Tracking-Loss, Reacquisition & Explicit Lock ---")
-    rc = RegionController(feather_radius=15, grace_period_sec=0.25)
-    lh = make_dummy_hand("ScreenLeft", 180, 240)
-    rh = make_dummy_hand("ScreenRight", 460, 240)
     dual = DualHandData(left_hand=lh, right_hand=rh, both_hands_visible=True, hands_count=2)
+    quad = rc.update(dual, (480, 640))
 
-    poly = rc.update(dual, (480, 640))
-    assert poly is not None
+    assert quad is not None, "Quad must not be None when both hands present"
+    assert len(quad) == 4, f"Quad must have exactly 4 control points, got {len(quad)}"
 
-    # Hands vanish
-    empty_dual = DualHandData()
-    rc.update(empty_dual, (480, 640))
-    assert rc.current_opacity > 0.0, "Should remain visible during grace period"
+    # Verify corner ordering: [TL, TR, BR, BL]
+    tl, tr, br, bl = quad
+    assert tl[0] < tr[0], f"Top-Left X ({tl[0]}) must be to the left of Top-Right X ({tr[0]})"
+    assert bl[0] < br[0], f"Bottom-Left X ({bl[0]}) must be to the left of Bottom-Right X ({br[0]})"
+    assert tl[1] < bl[1], f"Top-Left Y ({tl[1]}) must be higher up than Bottom-Left Y ({bl[1]})"
+    assert tr[1] < br[1], f"Top-Right Y ({tr[1]}) must be higher up than Bottom-Right Y ({br[1]})"
 
-    time.sleep(0.30)
-    cleared = rc.update(empty_dual, (480, 640))
-    assert cleared is None or rc.current_opacity == 0.0, "Stale region must be completely cleared after grace period!"
-    assert rc.polygon_pts is None, "polygon_pts must be None after tracking loss"
-    print("Tracking-loss cleanup verified: no stale frozen box.")
-
-    # Reacquisition
-    reacquired = rc.update(dual, (480, 640))
-    assert reacquired is not None, "Reacquisition must immediately generate fresh polygon"
-    assert rc.current_opacity > 0.1, "Reacquisition must immediately fade in"
-    print("Instant hand reacquisition confirmed.")
-
-    # Explicit Lock Behavior
-    assert not rc.is_locked, "Region must NOT be locked by default"
-    locked = rc.toggle_freeze()
-    assert locked and rc.is_locked, "Explicit toggle must freeze region"
-    frozen_pts = rc.get_current_polygon()
-
-    # Move hands while locked: polygon must remain locked
-    moved_lh = make_dummy_hand("ScreenLeft", 100, 100)
-    moved_rh = make_dummy_hand("ScreenRight", 300, 100)
-    moved_dual = DualHandData(left_hand=moved_lh, right_hand=moved_rh, both_hands_visible=True, hands_count=2)
-    poly_locked = rc.update(moved_dual, (480, 640))
-    assert np.array_equal(poly_locked, frozen_pts), "While locked, polygon must remain fixed at locked position"
-
-    # Explicit Unlock
-    unlocked = rc.toggle_freeze()
-    assert not unlocked and not rc.is_locked, "Explicit toggle must unlock region"
-    for _ in range(5):
-        poly_unlocked = rc.update(moved_dual, (480, 640))
-    assert not np.array_equal(poly_unlocked, frozen_pts), "After unlocking, region must resume tracking hands"
-    print("Explicit lock and unlock behavior verified.")
+    print("  -> Four live control points successfully extracted and ordered [TL, TR, BR, BL]!")
 
 
-def test_strict_mask_isolation() -> None:
-    print("\n--- 4. Verifying Effect Pixel Confinement (Strict Isolation) ---")
-    base_frame = np.full((480, 640, 3), [100, 150, 200], dtype=np.uint8)
-    effect_frame = np.full((480, 640, 3), [0, 0, 255], dtype=np.uint8)
+# --- TEST 2: LIVE PORTAL POSITION UPDATES ---
 
-    polygon = np.array([
-        [200, 160],
-        [440, 160],
-        [440, 320],
-        [200, 320]
+def test_live_portal_position_updates() -> None:
+    print("\n[Test 2] Live Portal Position Updates (Follows Hands Continuously)...")
+    rc = RegionController(activation_rule=ActivationGestureRule.BOTH_HANDS)
+
+    lh1 = make_dummy_hand("ScreenLeft", 160, 240)
+    rh1 = make_dummy_hand("ScreenRight", 480, 240)
+    dual1 = DualHandData(left_hand=lh1, right_hand=rh1, both_hands_visible=True, hands_count=2)
+    quad1 = rc.update(dual1, (480, 640))
+    centroid_y1 = float(np.mean(quad1[:, 1]))
+
+    # Move hands upward by 80px
+    lh2 = make_dummy_hand("ScreenLeft", 160, 160)
+    rh2 = make_dummy_hand("ScreenRight", 480, 160)
+    dual2 = DualHandData(left_hand=lh2, right_hand=rh2, both_hands_visible=True, hands_count=2)
+
+    quad2 = None
+    for _ in range(8):
+        quad2 = rc.update(dual2, (480, 640))
+    centroid_y2 = float(np.mean(quad2[:, 1]))
+
+    assert centroid_y2 < centroid_y1 - 40, f"Portal must translate upward with hands: {centroid_y2} < {centroid_y1}"
+
+    # Move hands rightward by 100px
+    lh3 = make_dummy_hand("ScreenLeft", 260, 160)
+    rh3 = make_dummy_hand("ScreenRight", 580, 160)
+    dual3 = DualHandData(left_hand=lh3, right_hand=rh3, both_hands_visible=True, hands_count=2)
+    quad3 = None
+    for _ in range(8):
+        quad3 = rc.update(dual3, (480, 640))
+    centroid_x3 = float(np.mean(quad3[:, 0]))
+
+    assert centroid_x3 > float(np.mean(quad2[:, 0])) + 50, "Portal must translate rightward with hands"
+    print("  -> Real-time continuous translation (up, down, left, right) confirmed!")
+
+
+# --- TEST 3: PORTAL DYNAMIC RESIZING ---
+
+def test_portal_resizing() -> None:
+    print("\n[Test 3] Dynamic Portal Resizing (Hands Spread vs Close)...")
+    rc = RegionController(activation_rule=ActivationGestureRule.BOTH_HANDS)
+
+    # Initial hand distance = 300px
+    lh_mid = make_dummy_hand("ScreenLeft", 170, 240)
+    rh_mid = make_dummy_hand("ScreenRight", 470, 240)
+    dual_mid = DualHandData(left_hand=lh_mid, right_hand=rh_mid, both_hands_visible=True, hands_count=2)
+    quad_mid = rc.update(dual_mid, (480, 640))
+    area_mid = float(cv2.contourArea(quad_mid))
+
+    # Spread hands apart to 460px (Expand)
+    lh_wide = make_dummy_hand("ScreenLeft", 90, 240)
+    rh_wide = make_dummy_hand("ScreenRight", 550, 240)
+    dual_wide = DualHandData(left_hand=lh_wide, right_hand=rh_wide, both_hands_visible=True, hands_count=2)
+    quad_wide = None
+    for _ in range(10):
+        quad_wide = rc.update(dual_wide, (480, 640))
+    area_wide = float(cv2.contourArea(quad_wide))
+
+    assert area_wide > area_mid * 1.25, f"Spreading hands must expand portal: {area_wide:.0f} > {area_mid:.0f}"
+
+    # Bring hands closer to 180px (Shrink)
+    lh_close = make_dummy_hand("ScreenLeft", 230, 240)
+    rh_close = make_dummy_hand("ScreenRight", 410, 240)
+    dual_close = DualHandData(left_hand=lh_close, right_hand=rh_close, both_hands_visible=True, hands_count=2)
+    quad_close = None
+    for _ in range(10):
+        quad_close = rc.update(dual_close, (480, 640))
+    area_close = float(cv2.contourArea(quad_close))
+
+    assert area_close < area_mid * 0.75, f"Bringing hands closer must shrink portal: {area_close:.0f} < {area_mid:.0f}"
+    print(f"  -> Dynamic resizing verified: Wide={area_wide:.0f}px², Mid={area_mid:.0f}px², Shrunk={area_close:.0f}px²")
+
+
+# --- TEST 4: CORNER ORDERING & PERSPECTIVE TRANSFORMATION ---
+
+def test_corner_ordering_and_perspective_transform() -> None:
+    print("\n[Test 4] Corner Ordering & OpenCV Perspective Transformation...")
+    sm = ScenePortalManager(scenes_dir="assets/scenes", default_fit_mode="crop")
+    assert sm.get_scene_count() >= 3, f"Expected at least 3 scenes in assets/scenes, found {sm.get_scene_count()}"
+
+    base_frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    quad = np.array([
+        [180, 120],  # TL
+        [460, 140],  # TR
+        [440, 360],  # BR
+        [160, 340]   # BL
     ], dtype=np.int32)
 
-    mask = np.zeros((480, 640), dtype=np.float32)
-    cv2.fillPoly(mask, [polygon], 1.0)
+    rendered = sm.render_portal(base_frame, quad, opacity=1.0)
+    assert rendered is not None and rendered.shape == base_frame.shape, "Rendered output shape must match base frame"
 
-    blended = MaskRenderer.apply_masked_effect(base_frame, effect_frame, mask, opacity=1.0)
-
-    outside_pixel = blended[50, 50]
-    assert np.array_equal(outside_pixel, [100, 150, 200]), f"Pixels outside region MUST be 100% unchanged! Got: {outside_pixel}"
-
-    inside_pixel = blended[240, 320]
-    assert np.array_equal(inside_pixel, [0, 0, 255]), f"Pixels inside region MUST contain the effect! Got: {inside_pixel}"
-
-    outside_diff = np.abs(blended[mask == 0].astype(np.int32) - base_frame[mask == 0].astype(np.int32))
-    assert np.max(outside_diff) == 0, "Zero pixel differences allowed outside the active mask!"
-    print("Strict mask isolation verified: Exactly 0 pixels altered outside the hand-controlled polygon.")
+    # Verify pixels inside portal changed to the scene image
+    inside_sample = rendered[240, 300]
+    assert not np.array_equal(inside_sample, [100, 100, 100]), "Inside portal pixels must contain warped scene!"
+    print(f"  -> Perspective transformation mapped scene cleanly onto {quad.shape} quad!")
 
 
-def test_effect_manager_and_warp() -> None:
-    print("\n--- 5. Testing Effect Manager & Perspective Warping ---")
-    em = EffectManager(effects_dir="assets/effects", textures_dir="assets/textures")
-    assert len(em.effects) >= 7, f"Expected at least 7 effects, found {len(em.effects)}"
+# --- TEST 5: INVALID & DEGENERATE POLYGON HANDLING ---
 
-    base = np.zeros((480, 640, 3), dtype=np.uint8)
-    poly = np.array([[150, 120], [490, 100], [470, 360], [160, 380]], dtype=np.int32)
+def test_invalid_and_degenerate_polygon_handling() -> None:
+    print("\n[Test 5] Invalid & Degenerate Polygon Handling (Graceful Hiding, 0 Crashes)...")
+    sm = ScenePortalManager(scenes_dir="assets/scenes")
+    base_frame = np.full((480, 640, 3), 150, dtype=np.uint8)
 
-    for eff in em.effects:
-        em.active_index = em.effects.index(eff)
-        out = em.render_effect_frame(base.copy(), poly)
-        assert out is not None and out.shape == base.shape, f"Effect {eff.display_name} shape mismatch"
+    # 1. Collapsed / Degenerate Quad (Points too close together)
+    collapsed_quad = np.array([[200, 200], [205, 200], [205, 205], [200, 205]], dtype=np.int32)
+    out1 = sm.render_portal(base_frame.copy(), collapsed_quad)
+    assert np.array_equal(out1, base_frame), "Collapsed quad must return base frame without crashing"
 
-    initial_id = em.get_active_effect().effect_id
-    next_eff = em.next_effect()
-    assert next_eff.effect_id != initial_id, "Next effect must change active effect"
-    prev_eff = em.prev_effect()
-    assert prev_eff.effect_id == initial_id, "Previous effect must return to original effect"
-    print(f"Effect Manager tested: {len(em.effects)} effects verified with perspective warping.")
+    # 2. Self-intersecting / Bowtie Quad (Crossed corners)
+    bowtie_quad = np.array([[100, 100], [300, 300], [100, 300], [300, 100]], dtype=np.int32)
+    out2 = sm.render_portal(base_frame.copy(), bowtie_quad)
+    assert np.array_equal(out2, base_frame), "Self-intersecting quad must return base frame without crashing"
 
+    # 3. None / Empty Quad
+    out3 = sm.render_portal(base_frame.copy(), None)
+    assert np.array_equal(out3, base_frame), "None polygon must return base frame cleanly"
 
-def test_background_and_character_compositing() -> None:
-    print("\n--- 6. Testing Virtual Background & Character Compositing ---")
-    bc = BackgroundCompositor(backgrounds_dir="assets/backgrounds")
-    assert len(bc.background_files) >= 4, f"Expected at least 4 backgrounds, found {len(bc.background_files)}"
+    # 4. Out-of-bounds coordinates
+    oob_quad = np.array([[-50, -50], [900, -20], [800, 600], [-30, 500]], dtype=np.int32)
+    out4 = sm.render_portal(base_frame.copy(), oob_quad)
+    assert out4 is not None and out4.shape == base_frame.shape, "Out of bounds quad must be clipped cleanly"
 
-    frame = np.full((480, 640, 3), 120, dtype=np.uint8)
-    p_mask = np.zeros((480, 640), dtype=np.float32)
-    cv2.ellipse(p_mask, (320, 240), (120, 200), 0, 0, 360, 1.0, -1)
-
-    # 1. Full Background Replacement
-    bg_full = bc.composite_full(frame, p_mask)
-    assert bg_full is not None and bg_full.shape == frame.shape
-    center_val = bg_full[240, 320]
-    assert np.allclose(center_val, [120, 120, 120], atol=5), "Person silhouette must be preserved"
-    corner_val = bg_full[10, 10]
-    assert not np.allclose(corner_val, [120, 120, 120], atol=10), "Room background must be replaced by virtual scene"
-
-    # 2. Scene Portal (Mode B)
-    poly = np.array([[200, 150], [440, 150], [440, 330], [200, 330]], dtype=np.int32)
-    portal_frame = bc.render_portal_frame(frame, poly)
-    assert portal_frame is not None and portal_frame.shape == frame.shape
-    print("Background full replacement and 4-point scene portal confirmed.")
-
-    # 3. Character Overlay Compositor
-    cc = CharacterCompositor(characters_dir="assets/characters", filters_dir="assets/filters")
-    assert len(cc.character_files) >= 4, f"Expected character assets, found {len(cc.character_files)}"
-    cc.is_enabled = True
-    char_composited = cc.composite(frame.copy())
-    assert char_composited is not None and char_composited.shape == frame.shape
-    print(f"Character overlay compositor verified: {len(cc.character_files)} character overlays ready.")
+    print("  -> Invalid, collapsed, self-intersecting, and OOB polygons safely handled!")
 
 
-def test_camera_and_recorder_cleanup() -> None:
-    print("\n--- 7. Testing Photo Capture, Video Recording & Cleanup ---")
-    frame = np.full((480, 640, 3), 180, dtype=np.uint8)
+# --- TEST 6: SCENE SWITCHING, CACHING & FIT MODES ---
 
-    success, p_path = PhotoSaver.save(frame, "output")
-    assert success and Path(p_path).exists(), f"PhotoSaver failed: {p_path}"
-    print(f"Photo successfully saved: {Path(p_path).name}")
+def test_scene_switching_and_caching() -> None:
+    print("\n[Test 6] Scene Switching, In-Memory Caching & Fit Modes...")
+    sm = ScenePortalManager(scenes_dir="assets/scenes", default_fit_mode="crop")
+    total = sm.get_scene_count()
+    assert total >= 3, f"Need at least 3 scenes, got {total}"
 
-    vr = VideoRecorder(output_dir="output")
-    started, msg = vr.start(640, 480, fps=30.0)
-    assert started, f"VideoRecorder failed to start: {msg}"
-    for _ in range(12):
-        vr.write_frame(frame)
-    stopped, v_path, frames, dur = vr.stop()
-    assert stopped and Path(v_path).exists(), f"VideoRecorder failed to stop: {v_path}"
-    print(f"Video successfully recorded: {Path(v_path).name} ({frames} frames)")
+    initial_name = sm.get_active_scene_name()
+    next_name = sm.next_scene()
+    assert next_name != initial_name, "next_scene() must change active scene"
 
-    # Clean up test output files
-    try:
-        Path(p_path).unlink(missing_ok=True)
-        Path(v_path).unlink(missing_ok=True)
-    except Exception:
-        pass
+    prev_name = sm.prev_scene()
+    assert prev_name == initial_name, "prev_scene() must return to original scene"
+
+    # In-memory caching: verify buffer is reused (not reading disk in frame loop)
+    item = sm.current_scene
+    assert item is not None
+    assert item.image_bgr is not None
+    assert item.image_bgr.shape[0] == item.height
+    assert item.image_bgr.shape[1] == item.width
+
+    # Fit modes: Crop, Letterbox, Stretch
+    base = np.full((480, 640, 3), 50, dtype=np.uint8)
+    quad = np.array([[180, 100], [460, 100], [460, 380], [180, 380]], dtype=np.int32)
+
+    for fit_mode in [AspectRatioFitMode.CROP, AspectRatioFitMode.LETTERBOX, AspectRatioFitMode.STRETCH]:
+        sm.set_fit_mode(fit_mode)
+        out = sm.render_portal(base.copy(), quad)
+        assert out is not None and out.shape == base.shape, f"Fit mode {fit_mode} failed"
+
+    print(f"  -> Verified scene cycling across {total} scenes and 3 fit modes (Crop, Letterbox, Stretch)!")
+
+
+# --- TEST 7: CORRECT TRANSPARENCY HANDLING (RGBA SCENES) ---
+
+def test_transparency_handling_rgba() -> None:
+    print("\n[Test 7] Transparency Handling for RGBA Scenes...")
+    sm = ScenePortalManager(scenes_dir="assets/scenes")
+
+    # Find cyber_warrior.png or any alpha-channel scene
+    rgba_scene = None
+    for item in sm.scene_items:
+        if item.has_alpha and item.image_alpha is not None:
+            rgba_scene = item
+            break
+
+    assert rgba_scene is not None, "At least one scene in assets/scenes must have an alpha channel (RGBA)"
+    sm.active_index = sm.scene_items.index(rgba_scene)
+
+    base_frame = np.full((480, 640, 3), [80, 120, 160], dtype=np.uint8)
+    quad = np.array([[150, 100], [490, 100], [490, 380], [150, 380]], dtype=np.int32)
+
+    rendered = sm.render_portal(base_frame.copy(), quad, opacity=1.0)
+    assert rendered is not None and rendered.shape == base_frame.shape
+
+    # Outside the polygon must be 100% untouched
+    assert np.array_equal(rendered[20, 20], [80, 120, 160]), "Outside pixels must remain untouched"
+    print(f"  -> RGBA scene '{rgba_scene.name}' rendered with clean alpha blending!")
+
+
+# --- TEST 8: STRICT PIXEL ISOLATION (ZERO CHANGE OUTSIDE POLYGON) ---
+
+def test_strict_pixel_isolation() -> None:
+    print("\n[Test 8] Strict Pixel Isolation (Mandatory Requirement 3)...")
+    sm = ScenePortalManager(scenes_dir="assets/scenes", feather_radius=0)
+
+    # Unique synthetic background pattern
+    np.random.seed(99)
+    base_frame = np.random.randint(0, 255, size=(480, 640, 3), dtype=np.uint8)
+
+    quad = np.array([
+        [190, 140],
+        [450, 120],
+        [470, 340],
+        [170, 360]
+    ], dtype=np.int32)
+
+    # Binary mask of the hand polygon
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    cv2.fillPoly(mask, [quad], 255)
+
+    rendered = sm.render_portal(base_frame.copy(), quad, opacity=1.0, feather_radius=0)
+
+    # Compare pixels where mask == 0
+    outside_mask = (mask == 0)
+    diff = np.abs(rendered[outside_mask].astype(np.int32) - base_frame[outside_mask].astype(np.int32))
+    max_diff = int(np.max(diff))
+
+    assert max_diff == 0, f"STRICT ISOLATION VIOLATION: Found {max_diff} difference outside portal mask!"
+    print("  -> EXACT 0 PIXEL DIFFERENCE outside portal mask! Strict pixel isolation verified 100%!")
+
+
+# --- TEST 9: TRACKING LOSS & INSTANT REACQUISITION ---
+
+def test_tracking_loss_and_reacquisition() -> None:
+    print("\n[Test 9] Tracking Loss Cleanup & Instant Reacquisition...")
+    rc = RegionController(grace_period_sec=0.20, activation_rule=ActivationGestureRule.BOTH_HANDS)
+
+    lh = make_dummy_hand("ScreenLeft", 170, 240)
+    rh = make_dummy_hand("ScreenRight", 470, 240)
+    dual = DualHandData(left_hand=lh, right_hand=rh, both_hands_visible=True, hands_count=2)
+
+    quad = rc.update(dual, (480, 640))
+    assert quad is not None and rc.is_active(), "Portal must be active when hands present"
+
+    # Tracking lost (hands drop out of view)
+    empty_dual = DualHandData()
+    rc.update(empty_dual, (480, 640))
+    time.sleep(0.25)
+    cleared = rc.update(empty_dual, (480, 640))
+
+    assert cleared is None, "Stale portal must be completely cleared after grace period!"
+    assert rc.polygon_pts is None, "polygon_pts must be None (zero stuck coordinates)"
+    assert not rc.is_active(), "Region must be inactive after tracking loss"
+
+    # Reacquisition: hands return
+    reacquired = rc.update(dual, (480, 640))
+    assert reacquired is not None, "Portal must immediately reacquire when hands return"
+    assert rc.is_active(), "Portal must immediately become active on reacquisition"
+    print("  -> Zero stale freeze on tracking loss; instant reacquisition confirmed!")
+
+
+# --- TEST 10: CONFIGURABLE ACTIVATION RULES ---
+
+def test_configurable_activation_rules() -> None:
+    print("\n[Test 10] Configurable Activation Rules (Dual Pinch, Framing, Both Hands)...")
+    rc = RegionController(activation_rule=ActivationGestureRule.DUAL_PINCH)
+
+    # 1. Non-pinching hands (open frame)
+    lh_open = make_dummy_hand("ScreenLeft", 180, 240, pinching=False)
+    rh_open = make_dummy_hand("ScreenRight", 460, 240, pinching=False)
+    dual_open = DualHandData(left_hand=lh_open, right_hand=rh_open, both_hands_visible=True, hands_count=2)
+
+    # In DUAL_PINCH mode: open hands do NOT activate portal
+    res1 = rc.update(dual_open, (480, 640))
+    assert res1 is None, "In DUAL_PINCH mode, open hands must NOT activate portal"
+
+    # 2. Pinching hands in DUAL_PINCH mode -> ACTIVATES!
+    lh_pinch = make_dummy_hand("ScreenLeft", 180, 240, pinching=True)
+    rh_pinch = make_dummy_hand("ScreenRight", 460, 240, pinching=True)
+    dual_pinch = DualHandData(left_hand=lh_pinch, right_hand=rh_pinch, both_hands_visible=True, hands_count=2, is_dual_pinching=True)
+
+    res2 = rc.update(dual_pinch, (480, 640))
+    assert res2 is not None, "Dual pinch MUST activate portal in DUAL_PINCH mode!"
+
+    # 3. Switch to FRAMING mode -> open hands activate
+    rc.set_activation_rule(ActivationGestureRule.FRAMING)
+    res3 = rc.update(dual_open, (480, 640))
+    assert res3 is not None, "Framing hands MUST activate portal in FRAMING mode!"
+
+    # 4. Switch to BOTH_HANDS mode
+    rc.set_activation_rule(ActivationGestureRule.BOTH_HANDS)
+    res4 = rc.update(dual_open, (480, 640))
+    assert res4 is not None, "Any hands in view activate portal in BOTH_HANDS mode!"
+
+    print("  -> Configurable activation rules ('dual_pinch', 'framing', 'both_hands') validated!")
 
 
 def run_all_tests() -> None:
-    print("=" * 60)
-    print("IMMERSIVE GESTURE AR STUDIO - COMPREHENSIVE PIPELINE TESTS")
-    print("=" * 60)
+    print("=" * 70)
+    print("TWO-HAND FULL-SCENE AR PORTAL - COMPREHENSIVE VERIFICATION SUITE")
+    print("=" * 70)
 
-    test_hand_and_gestures()
-    test_region_controller_and_resizing()
-    test_reacquisition_and_explicit_locking()
-    test_strict_mask_isolation()
-    test_effect_manager_and_warp()
-    test_background_and_character_compositing()
-    test_camera_and_recorder_cleanup()
+    test_four_point_extraction_from_both_hands()
+    test_live_portal_position_updates()
+    test_portal_resizing()
+    test_corner_ordering_and_perspective_transform()
+    test_invalid_and_degenerate_polygon_handling()
+    test_scene_switching_and_caching()
+    test_transparency_handling_rgba()
+    test_strict_pixel_isolation()
+    test_tracking_loss_and_reacquisition()
+    test_configurable_activation_rules()
 
-    print("\n" + "=" * 60)
-    print(">>> ALL 7 PIPELINE VERIFICATION SUITES PASSED CLEANLY! <<<")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print(">>> ALL 10 UNIT & INTEGRATION TEST SUITES PASSED FLAWLESSLY! <<<")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

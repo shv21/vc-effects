@@ -1,11 +1,14 @@
 """
 Gesture-Controlled AR Experience - Application Launcher
+Two-Hand-Controlled Full-Scene AR Portal
+
 Usage:
-    python main.py                  # Launch desktop AR Studio
-    python main.py --camera 0       # Select webcam index
-    python main.py --scan-cameras   # Discover connected webcams
-    python main.py --list-effects   # List available hand-controlled effects
-    python main.py --list-scenes    # List available virtual backgrounds
+    python main.py                     # Launch Two-Hand Scene Portal AR Studio
+    python main.py --camera 0          # Select webcam index
+    python main.py --activation pinch  # Activation rule ('pinch', 'framing', 'both')
+    python main.py --scan-cameras      # Discover connected webcams
+    python main.py --list-scenes       # List available complete scene images
+    python main.py --list-effects      # List available hand-controlled effects
 """
 
 import sys
@@ -18,8 +21,6 @@ from pathlib import Path
 warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf")
 
 # Automatic venv delegation:
-# If user runs 'py main.py' or 'python main.py' without activating the venv,
-# automatically relaunch with .\venv\Scripts\python.exe where dependencies are installed.
 ROOT_DIR = Path(__file__).resolve().parent
 VENV_PYTHON = ROOT_DIR / "venv" / "Scripts" / "python.exe"
 
@@ -58,7 +59,8 @@ except ImportError as err:
 
 from src.camera import Camera
 from src.effect_manager import EffectManager
-from src.background_compositor import BackgroundCompositor
+from src.scene_manager import ScenePortalManager, AspectRatioFitMode
+from src.region_controller import ActivationGestureRule
 from src.app import ImmersiveARStudioApp
 
 
@@ -77,20 +79,33 @@ def print_banner() -> None:
  / __| __/ __|_   _| | | | _ \ __|    /_\ | _ \  / __|_   _| | | |   \_ _/ _ \ 
 | (_ | _|\__ \ | | | |_| |   / _|    / _ \|   /  \__ \ | | | |_| | |) | | (_) |
  \___|___|___/ |_|  \___/|_|_\___|  /_/ \_\_|_\  |___/ |_|  \___/|___/___\___/ 
-             === HAND-DEFINED REGION & SCENE TRANSFORMATION ===
+          === TWO-HAND-CONTROLLED FULL-SCENE AR PORTAL ===
     """
     print(banner)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Gesture-Controlled AR Experience with Hand-Defined Effects & Background Transformation"
+        description="Two-Hand-Controlled Full-Scene AR Portal (Character + Background Scene inside Hand Quad)"
     )
     parser.add_argument(
         "--camera",
         type=int,
         default=0,
         help="Webcam device index (default: 0)"
+    )
+    parser.add_argument(
+        "--scenes-dir",
+        type=str,
+        default="assets/scenes",
+        help="Directory containing user scene images (default: assets/scenes)"
+    )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        choices=["pinch", "framing", "both"],
+        default="pinch",
+        help="Activation gesture rule: 'pinch' (dual pinch), 'framing', 'both' (default: pinch)"
     )
     parser.add_argument(
         "--output",
@@ -104,14 +119,14 @@ def main() -> None:
         help="Scan and list working webcam device indices"
     )
     parser.add_argument(
-        "--list-effects",
-        action="store_true",
-        help="List all active hand-controlled effects and textures"
-    )
-    parser.add_argument(
         "--list-scenes",
         action="store_true",
-        help="List all discovered virtual backgrounds"
+        help="List all discovered complete scene images in assets/scenes/"
+    )
+    parser.add_argument(
+        "--list-effects",
+        action="store_true",
+        help="List all active hand-controlled effects"
     )
     parser.add_argument(
         "--verbose",
@@ -133,6 +148,13 @@ def main() -> None:
             print("No webcams detected. Check connection and Windows privacy permissions.")
         return
 
+    if args.list_scenes:
+        sm = ScenePortalManager(scenes_dir=args.scenes_dir)
+        print(f"\nDiscovered {len(sm.scene_items)} Complete Scene Images in {args.scenes_dir}:")
+        for idx, item in enumerate(sm.scene_items):
+            print(f"  [{idx:02d}] {item.name} ({item.width}x{item.height}, Alpha: {item.has_alpha}) - {item.file_path.name}")
+        return
+
     if args.list_effects:
         em = EffectManager(effects_dir="assets/effects", textures_dir="assets/textures")
         print(f"\nDiscovered {len(em.effects)} Hand-Controlled Effects:")
@@ -140,35 +162,50 @@ def main() -> None:
             print(f"  [{idx:02d}] {eff.display_name} ({eff.effect_type}) - {eff.category}")
         return
 
-    if args.list_scenes:
-        bc = BackgroundCompositor(backgrounds_dir="assets/backgrounds")
-        print(f"\nDiscovered {len(bc.background_files)} Virtual Scene Backgrounds:")
-        for idx, p in enumerate(bc.background_files):
-            print(f"  [{idx:02d}] {p.stem.replace('_', ' ').title()} ({p.name})")
-        return
+    # Map activation rule string
+    rule_map = {
+        "pinch": ActivationGestureRule.DUAL_PINCH,
+        "framing": ActivationGestureRule.FRAMING,
+        "both": ActivationGestureRule.BOTH_HANDS
+    }
+    activation_rule = rule_map.get(args.activation, ActivationGestureRule.DUAL_PINCH)
 
-    print("Launching Immersive Gesture AR Studio...")
-    print(f"Camera index: {args.camera}")
-    print(f"Output folder: {args.output}")
-    print("\nPrimary Hands-Free Gestures:")
-    print("  👋 Swipe Right / Left : Next / Previous Effect")
-    print("  ✌️  Peace / V-Sign     : Cycle AR Mode (Mode A -> B -> C -> D)")
-    print("  🤏 Dual Pinch         : Continuous Precision Framing")
-    print("  ✋ Open Palms         : Live Dynamic Follow")
-    print("\nShortcuts:")
-    print("  [F11 / F] : Toggle Fullscreen")
-    print("  [D]       : Toggle Debug Telemetry & Skeletons")
-    print("  [1 - 4]   : Jump directly to Mode A, B, C, or D")
-    print("  [M]       : Cycle Mode")
-    print("  [B]       : Next Background Scene")
-    print("  [C]       : Next Character Mask")
-    print("  [L]       : Toggle Lock / Freeze")
-    print("  [Space]   : Snapshot Photo")
-    print("  [R]       : Start/Stop Video Recording")
-    print("  [Esc]     : Exit\n")
+    print("Launching Two-Hand-Controlled Full-Scene AR Portal...")
+    print(f"Camera index      : {args.camera}")
+    print(f"Scenes directory  : {args.scenes_dir}")
+    print(f"Activation rule   : {args.activation.upper()} (Thumb & Index)")
+    print(f"Output folder     : {args.output}")
+
+    print("\nHow to Use:")
+    print("  1. Present both hands to the webcam.")
+    print("  2. Pinch thumb and index finger of each hand (or use [G] to switch gesture rule).")
+    print("  3. The full scene image appears perspective-warped strictly between your hands.")
+    print("  4. Move hands apart to enlarge; bring hands closer to shrink.")
+    print("  5. Move hands up/down/left/right to steer the portal.")
+    print("  6. Release pinch to close portal. Normal live camera remains 100% untouched outside!")
+
+    print("\nKeyboard Shortcuts:")
+    print("  [S] / [Right] : Next Scene")
+    print("  [Left]        : Previous Scene")
+    print("  [A]           : Cycle Fit Mode (Crop [Fill] / Letterbox / Stretch)")
+    print("  [G]           : Cycle Gesture Rule (Dual Pinch / Framing / Both Hands)")
+    print("  [O]           : Open File Dialog (Load any custom scene image)")
+    print("  [F5]          : Reload Scenes from Disk")
+    print("  [D]           : Toggle Debug Mode (Landmarks, Corner Nodes, Telemetry)")
+    print("  [F11 / F]     : Toggle Fullscreen")
+    print("  [Space]       : Snapshot Photo")
+    print("  [R]           : Start/Stop Video Recording")
+    print("  [1 - 4]       : Jump to Mode (1: Portal [Default], 2: Effect, 3: Character, 4: Combined)")
+    print("  [M]           : Cycle Mode")
+    print("  [Esc]         : Exit Fullscreen / Exit Application\n")
 
     try:
-        app = ImmersiveARStudioApp(camera_index=args.camera, output_dir=args.output)
+        app = ImmersiveARStudioApp(
+            camera_index=args.camera,
+            output_dir=args.output,
+            scenes_dir=args.scenes_dir,
+            activation_rule=activation_rule
+        )
         app.run()
     except KeyboardInterrupt:
         print("\n[INFO] Studio closed cleanly.")

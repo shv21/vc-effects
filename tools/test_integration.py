@@ -23,7 +23,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.hand_tracker import HandTracker, HandData, DualHandData
 from src.gesture_recognizer import GestureRecognizer, GestureResult
-from src.region_controller import RegionController
+from src.region_controller import RegionController, ActivationGestureRule
+from src.scene_manager import ScenePortalManager, AspectRatioFitMode
 from src.mask_renderer import MaskRenderer
 from src.effect_manager import EffectManager
 from src.person_segmenter import PersonSegmenter
@@ -94,13 +95,15 @@ def test_end_to_end_integration() -> None:
 
     # 1. Initialize complete pipeline components
     print("\n[Step 1] Initializing Pipeline Engines...")
-    region_ctrl = RegionController(feather_radius=21, smoothing_alpha=0.82, grace_period_sec=0.30)
+    region_ctrl = RegionController(feather_radius=0, smoothing_alpha=0.82, grace_period_sec=0.30, activation_rule=ActivationGestureRule.DUAL_PINCH)
+    scene_portal_mgr = ScenePortalManager(scenes_dir="assets/scenes", default_fit_mode=AspectRatioFitMode.CROP, feather_radius=0)
     effect_mgr = EffectManager(effects_dir="assets/effects", textures_dir="assets/textures")
     bg_comp = BackgroundCompositor(backgrounds_dir="assets/backgrounds")
     char_comp = CharacterCompositor(characters_dir="assets/characters", filters_dir="assets/filters")
     char_comp.is_enabled = True
     recognizer = GestureRecognizer()
 
+    print(f" - Loaded {scene_portal_mgr.get_scene_count()} complete scene images in assets/scenes/")
     print(f" - Loaded {len(effect_mgr.effects)} effects")
     print(f" - Loaded {len(bg_comp.background_files)} virtual background scenes")
     print(f" - Loaded {len(char_comp.character_files)} character overlays")
@@ -145,14 +148,13 @@ def test_end_to_end_integration() -> None:
     assert diff_outside == 0, f"Mode A violation: {diff_outside} pixels altered outside active region"
     print(" - Mode A Verified: 100% pixel isolation outside hand region confirmed.")
 
-    # 4. Verify Mode B: 4-Point Perspective Scene Portal
-    print("\n[Step 4] Testing Mode B (Scene Portal with Perspective Warp)...")
-    portal_frame = bg_comp.render_portal_frame(base_frame, poly_far)
-    assert portal_frame is not None and portal_frame.shape == base_frame.shape
-    out_mode_b = MaskRenderer.apply_masked_effect(base_frame, portal_frame, mask_a, opacity=0.98)
-    diff_portal_outside = np.max(np.abs(out_mode_b[outside_mask].astype(np.int32) - base_frame[outside_mask].astype(np.int32)))
-    assert diff_portal_outside == 0, "Mode B: Outside pixels must be completely untouched"
-    print(" - Mode B Verified: 4-point perspective portal rendered cleanly.")
+    # 4. Verify Full-Scene AR Portal (ScenePortalManager) & Perspective Warp
+    print("\n[Step 4] Testing Full-Scene AR Portal (Character + Background Scene inside Quad)...")
+    portal_scene_out = scene_portal_mgr.render_portal(base_frame, poly_far, opacity=1.0, feather_radius=0)
+    assert portal_scene_out is not None and portal_scene_out.shape == base_frame.shape
+    diff_outside_scene = np.max(np.abs(portal_scene_out[outside_mask].astype(np.int32) - base_frame[outside_mask].astype(np.int32)))
+    assert diff_outside_scene == 0, f"Full-Scene AR Portal: Outside pixels must be completely untouched! Diff: {diff_outside_scene}"
+    print(" - Full-Scene AR Portal Verified: Strict pixel isolation & complete scene warping confirmed.")
 
     # 5. Verify Mode C: Background Replacement + Person Silhouette
     print("\n[Step 5] Testing Mode C (Character Transformation & Background Replacement)...")
