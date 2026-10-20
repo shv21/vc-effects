@@ -1,7 +1,7 @@
 """
-Camera capture module for Spider-Man AR Studio.
-Handles webcam initialization, device selection, frame reading, and FPS calculation.
-Optimized for Windows with DirectShow fallback.
+Camera capture module for Gesture-Controlled AR Experience.
+Handles webcam initialization, DirectShow acceleration on Windows,
+resolution configuration, and smoothed FPS calculation.
 """
 
 import time
@@ -14,13 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 class Camera:
-    """Manages webcam capture, configuration, and FPS estimation."""
+    """Manages webcam video capture, device selection, and FPS estimation."""
 
     def __init__(
         self,
         device_index: int = 0,
-        width: int = 1280,
-        height: int = 720,
+        width: int = 640,
+        height: int = 480,
         fps: int = 30
     ) -> None:
         self.device_index = device_index
@@ -34,49 +34,48 @@ class Camera:
         # FPS tracking
         self.prev_time = 0.0
         self.current_fps = 0.0
-        self.fps_alpha = 0.9  # Smoothing factor for FPS
+        self.fps_alpha = 0.9
 
     def start(self) -> bool:
         """
-        Open the camera using DirectShow (preferred on Windows) or default backend.
+        Opens camera using DirectShow (preferred on Windows) or default backend.
         Returns True if successful, False otherwise.
         """
         if self.is_running and self.cap and self.cap.isOpened():
             return True
 
-        logger.info(f"Attempting to open camera index {self.device_index}...")
+        logger.info(f"Opening camera index {self.device_index}...")
 
-        # Try cv2.CAP_DSHOW first on Windows for fast startup and low latency
+        # DirectShow is optimal on Windows for low latency
         try:
             self.cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
             if not self.cap or not self.cap.isOpened():
-                logger.warning("DirectShow failed or unsupported. Trying default backend...")
+                logger.warning("DirectShow failed. Falling back to default backend...")
                 self.cap = cv2.VideoCapture(self.device_index)
         except Exception as e:
-            logger.warning(f"Error opening with DirectShow: {e}. Trying default...")
+            logger.warning(f"Error opening camera with DirectShow: {e}")
             self.cap = cv2.VideoCapture(self.device_index)
 
         if not self.cap or not self.cap.isOpened():
-            logger.error(f"Failed to open camera with index {self.device_index}.")
+            logger.error(f"Cannot open webcam index {self.device_index}.")
             self.is_running = False
             return False
 
-        # Configure camera properties
+        # Configure resolution & FPS
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.desired_width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.desired_height)
         self.cap.set(cv2.CAP_PROP_FPS, self.desired_fps)
 
         self.is_running = True
         self.prev_time = time.time()
-        logger.info(
-            f"Camera initialized: {int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
-            f"{int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} @ {self.cap.get(cv2.CAP_PROP_FPS)} FPS"
-        )
+        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        logger.info(f"Camera ready: {actual_w}x{actual_h} @ {self.desired_fps} FPS target")
         return True
 
     def read_frame(self) -> Tuple[bool, Optional[np.ndarray]]:
         """
-        Reads a frame from the webcam and updates FPS.
+        Reads next frame from webcam.
         Returns (success, frame_bgr).
         """
         if not self.is_running or self.cap is None or not self.cap.isOpened():
@@ -84,10 +83,9 @@ class Camera:
 
         ret, frame = self.cap.read()
         if not ret or frame is None or frame.size == 0:
-            logger.warning("Empty frame received from webcam.")
             return False, None
 
-        # Calculate FPS with exponential smoothing
+        # Smooth FPS calculation
         now = time.time()
         dt = now - self.prev_time
         self.prev_time = now
@@ -99,23 +97,19 @@ class Camera:
         return True, frame
 
     def get_fps(self) -> float:
-        """Returns the smoothed FPS estimate."""
+        """Returns smoothed FPS estimate."""
         return self.current_fps
 
     def get_resolution(self) -> Tuple[int, int]:
-        """Returns (width, height) of the active camera feed."""
+        """Returns (width, height) of camera stream."""
         if self.cap and self.cap.isOpened():
-            w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            return w, h
-        return 0, 0
+            return int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return self.desired_width, self.desired_height
 
     def is_opened(self) -> bool:
-        """Checks if the camera stream is currently active."""
         return bool(self.is_running and self.cap and self.cap.isOpened())
 
     def release(self) -> None:
-        """Cleanly releases the camera hardware."""
         self.is_running = False
         if self.cap is not None:
             try:
@@ -123,11 +117,9 @@ class Camera:
             except Exception as e:
                 logger.error(f"Error releasing camera: {e}")
             self.cap = None
-        logger.info("Camera released cleanly.")
 
     @staticmethod
     def scan_available_cameras(max_tested: int = 5) -> list[int]:
-        """Scans indices 0..max_tested-1 to identify working webcams."""
         available = []
         for idx in range(max_tested):
             temp_cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
@@ -135,7 +127,6 @@ class Camera:
                 available.append(idx)
                 temp_cap.release()
             else:
-                # Also test standard backend
                 temp_cap = cv2.VideoCapture(idx)
                 if temp_cap is not None and temp_cap.isOpened():
                     available.append(idx)

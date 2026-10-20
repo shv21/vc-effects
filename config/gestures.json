@@ -1,0 +1,23 @@
+{
+    "description": "Gesture recognition thresholds, hold times, and action mappings",
+    "version": "2.0",
+    "thresholds": {
+        "pinch_distance_px": 42.0,
+        "pinch_release_px": 55.0,
+        "swipe_velocity_min": 280.0,
+        "swipe_displacement_min_px": 65.0,
+        "swipe_duration_max_sec": 0.35,
+        "gesture_hold_time_sec": 0.15,
+        "gesture_cooldown_sec": 0.55,
+        "smoothing_alpha": 0.72
+    },
+    "gesture_actions": {
+        "swipe_left": "next_effect",
+        "swipe_right": "prev_effect",
+        "dual_pinch": "toggle_lock_region",
+        "single_pinch": "fine_tune_region",
+        "open_palm": "preview_mode",
+        "v_sign": "cycle_scene_mode",
+        "fist": "freeze_region"
+    }
+}

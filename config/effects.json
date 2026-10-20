@@ -1,0 +1,68 @@
+{
+    "description": "Configuration for hand-controlled polygon effects and visual transformations",
+    "version": "2.0",
+    "defaults": {
+        "edge_feather_radius": 21,
+        "effect_opacity": 0.95,
+        "invert_mask": false,
+        "blend_mode": "alpha"
+    },
+    "effects": {
+        "magic_portal": {
+            "display_name": "Magic Energy Portal",
+            "type": "procedural",
+            "category": "Energy",
+            "edge_feather_radius": 25,
+            "opacity": 0.95,
+            "description": "Swirling concentric plasma portal with pulsing core"
+        },
+        "spider_web_zone": {
+            "display_name": "Spider-Web Zone",
+            "type": "procedural",
+            "category": "Hero",
+            "edge_feather_radius": 15,
+            "opacity": 0.90,
+            "description": "Intricate geometric spider-web lattice constrained to hands"
+        },
+        "cyber_matrix": {
+            "display_name": "Cyber Matrix Grid",
+            "type": "procedural",
+            "category": "Sci-Fi",
+            "edge_feather_radius": 19,
+            "opacity": 0.92,
+            "description": "Digital neon telemetry grid and cybernetic scanlines"
+        },
+        "cosmic_nebula": {
+            "display_name": "Cosmic Nebula",
+            "type": "procedural",
+            "category": "Space",
+            "edge_feather_radius": 27,
+            "opacity": 0.88,
+            "description": "Swirling deep-space starlight and violet nebula cloud"
+        },
+        "thermal_vision": {
+            "display_name": "Thermal Heat Signature",
+            "type": "procedural",
+            "category": "Vision",
+            "edge_feather_radius": 17,
+            "opacity": 0.95,
+            "description": "Infrared heat signature spectrum inside hand boundary"
+        },
+        "flame_aura": {
+            "display_name": "Fire & Plasma Aura",
+            "type": "procedural",
+            "category": "Energy",
+            "edge_feather_radius": 23,
+            "opacity": 0.92,
+            "description": "Dynamic turbulent flame and plasma vortex"
+        },
+        "comic_halftone": {
+            "display_name": "Comic Pop-Art Halftone",
+            "type": "procedural",
+            "category": "Style",
+            "edge_feather_radius": 13,
+            "opacity": 0.95,
+            "description": "Pop-art comic printing dot screen and ink edges"
+        }
+    }
+}

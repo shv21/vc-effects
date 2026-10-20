@@ -1,10 +1,11 @@
 """
-Spider-Man AR Studio - Main Application Launcher
+Gesture-Controlled AR Experience - Application Launcher
 Usage:
-    python main.py                  # Launch desktop GUI
-    python main.py --camera 1       # Use camera device 1
+    python main.py                  # Launch desktop AR Studio
+    python main.py --camera 0       # Select webcam index
     python main.py --scan-cameras   # Discover connected webcams
-    python main.py --list-filters   # List all registered filters
+    python main.py --list-effects   # List available hand-controlled effects
+    python main.py --list-scenes    # List available virtual backgrounds
 """
 
 import sys
@@ -25,8 +26,7 @@ if VENV_PYTHON.exists():
         if current_exe != target_exe:
             exit_code = subprocess.call([str(target_exe)] + sys.argv)
             sys.exit(exit_code)
-    except Exception as e:
-        # If delegation fails, continue with current interpreter
+    except Exception:
         pass
 
 if str(ROOT_DIR) not in sys.path:
@@ -50,12 +50,12 @@ except ImportError as err:
     sys.exit(1)
 
 from src.camera import Camera
-from src.filter_manager import FilterManager
-from src.app import ARStudioApp
+from src.effect_manager import EffectManager
+from src.background_compositor import BackgroundCompositor
+from src.app import GestureARStudioApp
 
 
 def setup_logging(verbose: bool = False) -> None:
-    """Configures console and file logging."""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -65,20 +65,19 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def print_banner() -> None:
-    """Prints a Spider-Man AR Studio ASCII header."""
     banner = r"""
-  ___ ___ ___ ___  ___ ___   __  __   _   _  _     _   ___    ___ _____ _   _ ___ ___ ___  
- / __| _ \_ _|   \| __| _ \ |  \/  | /_\ | \| |   /_\ | _ \  / __|_   _| | | |   \_ _/ _ \ 
- \__ \  _/| || |) | _||   / | |\/| |/ _ \| .` |  / _ \|   /  \__ \ | | | |_| | |) | | (_) |
- |___/_| |___|___/|___|_|_\ |_|  |_/_/ \_\_|\_| /_/ \_\_|_\  |___/ |_|  \___/|___/___\___/ 
-                     === REAL-TIME FACE FILTER ENGINE ===
+  ___ ___ ___ _____ _   _ ___ ___      _   ___    ___ _____ _   _ ___ ___ ___  
+ / __| __/ __|_   _| | | | _ \ __|    /_\ | _ \  / __|_   _| | | |   \_ _/ _ \ 
+| (_ | _|\__ \ | | | |_| |   / _|    / _ \|   /  \__ \ | | | |_| | |) | | (_) |
+ \___|___|___/ |_|  \___/|_|_\___|  /_/ \_\_|_\  |___/ |_|  \___/|___/___\___/ 
+             === HAND-DEFINED REGION & SCENE TRANSFORMATION ===
     """
     print(banner)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Spider-Man AR Studio - Real-Time Custom Face Filters"
+        description="Gesture-Controlled AR Experience with Hand-Defined Effects & Background Transformation"
     )
     parser.add_argument(
         "--camera",
@@ -90,7 +89,7 @@ def main() -> None:
         "--output",
         type=str,
         default="output",
-        help="Directory to save photos and recorded videos (default: output)"
+        help="Output directory for photos and recordings (default: output)"
     )
     parser.add_argument(
         "--scan-cameras",
@@ -98,9 +97,14 @@ def main() -> None:
         help="Scan and list working webcam device indices"
     )
     parser.add_argument(
-        "--list-filters",
+        "--list-effects",
         action="store_true",
-        help="List all discovered built-in and PNG filters"
+        help="List all active hand-controlled effects and textures"
+    )
+    parser.add_argument(
+        "--list-scenes",
+        action="store_true",
+        help="List all discovered virtual backgrounds"
     )
     parser.add_argument(
         "--verbose",
@@ -117,31 +121,36 @@ def main() -> None:
         found = Camera.scan_available_cameras(max_tested=5)
         if found:
             print(f"Connected camera indices detected: {found}")
-            print(f"To use a specific camera: python main.py --camera {found[0]}")
+            print(f"To launch with a specific camera: python main.py --camera {found[0]}")
         else:
-            print("No accessible webcams detected. Check USB connection and Windows privacy permissions.")
+            print("No webcams detected. Check connection and Windows privacy permissions.")
         return
 
-    if args.list_filters:
-        print("Discovering active filters...")
-        fm = FilterManager()
-        print(f"\nDiscovered {len(fm.filters)} Filters:")
-        for idx, f in enumerate(fm.filters):
-            print(f"  [{idx:02d}] {f.display_name} ({f.filter_type}) - {f.category}")
+    if args.list_effects:
+        em = EffectManager(effects_dir="assets/effects", textures_dir="assets/textures")
+        print(f"\nDiscovered {len(em.effects)} Hand-Controlled Effects:")
+        for idx, eff in enumerate(em.effects):
+            print(f"  [{idx:02d}] {eff.display_name} ({eff.effect_type}) - {eff.category}")
         return
 
-    print("Launching Spider-Man AR Studio GUI...")
+    if args.list_scenes:
+        bc = BackgroundCompositor(backgrounds_dir="assets/backgrounds")
+        print(f"\nDiscovered {len(bc.background_files)} Virtual Scene Backgrounds:")
+        for idx, p in enumerate(bc.background_files):
+            print(f"  [{idx:02d}] {p.stem.replace('_', ' ').title()} ({p.name})")
+        return
+
+    print("Launching Gesture-Controlled AR Studio...")
     print(f"Camera index: {args.camera}")
-    print(f"Output directory: {args.output}")
-    print("Shortcuts:")
-    print("  [Left/Right] : Previous / Next Filter")
-    print("  [Space]      : Capture Snapshot Photo")
-    print("  [R]          : Start / Stop Recording Video")
-    print("  [0]          : Reset to 'No Filter'")
-    print("  [F5]         : Refresh Filters from assets/filters/")
-    print("  [ESC]        : Exit Studio\n")
+    print(f"Output folder: {args.output}")
+    print("\nPrimary Hands-Free Gestures:")
+    print("  👋 Swipe Right / Left : Next / Previous Effect")
+    print("  🤏 Dual Pinch         : Lock / Unlock Region")
+    print("  ✌️  Peace / V-Sign     : Cycle Scene Mode (A -> B -> C -> D -> E)")
+    print("  ✋ Open Palms         : Dynamic Region Follow")
+    print("  ✊ Fist               : Freeze Region Position\n")
 
-    app = ARStudioApp(camera_index=args.camera, output_dir=args.output)
+    app = GestureARStudioApp(camera_index=args.camera, output_dir=args.output)
     app.run()
 
 
