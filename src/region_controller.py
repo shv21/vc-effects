@@ -2,10 +2,12 @@
 Two-hand dynamic region controller.
 Creates, resizes, repositions, feathers, and smoothly fades the user-defined polygon region.
 Ensures:
-- Real-time continuous live tracking by default (no unwanted locking)
-- Clockwise convex quadrilateral sorting to prevent twisted polygons
+- Real-time continuous live tracking by default (no accidental locking)
+- 4 control points calculated from Thumb tips and Index tips of both hands
+- Clockwise convex quadrilateral sorting to prevent twisted/bowtie polygons
+- Automatic orientation adaptation for rotated/tilted hands
 - Grace period & smooth fadeout on tracking loss (never stays frozen indefinitely)
-- Fast reacquisition when hands return
+- Instant reacquisition when hands return
 """
 
 import time
@@ -32,12 +34,14 @@ class RegionController:
     def __init__(
         self,
         feather_radius: int = 21,
-        smoothing_alpha: float = 0.80,
-        grace_period_sec: float = 0.40
+        smoothing_alpha: float = 0.82,
+        grace_period_sec: float = 0.40,
+        min_size_px: int = 40
     ) -> None:
         self.feather_radius = feather_radius
         self.smoothing_alpha = smoothing_alpha
         self.grace_period_sec = grace_period_sec
+        self.min_size_px = min_size_px
 
         self.polygon_pts: Optional[np.ndarray] = None  # (4, 2) float32
         self.is_frozen: bool = False
@@ -63,35 +67,75 @@ class RegionController:
     def update(self, dual: DualHandData, frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
         """
         Updates the region polygon from fresh hand landmarks every frame.
+        Follows both hands continuously without freezing.
         Returns (4, 2) int32 vertices or None.
         """
         now = time.time()
         h, w = frame_shape[:2]
 
+        # Explicit user freeze takes precedence
         if self.is_frozen and self.frozen_pts is not None:
             self.current_opacity = 1.0
             return self.frozen_pts.astype(np.int32)
 
+        # Both hands are visible: update continuously
         if dual.both_hands_visible:
             self.tracking_loss_time = None
-            # Ramp opacity up quickly
-            self.current_opacity = min(1.0, self.current_opacity + 0.15)
+            # Fast fade-in
+            self.current_opacity = min(1.0, self.current_opacity + 0.20)
 
             lh = dual.left_hand
             rh = dual.right_hand
 
-            # 4 Control Points from Thumb Tips and Index Tips of both hands
+            # Calculate 4 control points from Left Hand (Index & Thumb) and Right Hand (Index & Thumb)
+            lh_index = np.array([float(lh.index_tip[0]), float(lh.index_tip[1])], dtype=np.float32)
+            lh_thumb = np.array([float(lh.thumb_tip[0]), float(lh.thumb_tip[1])], dtype=np.float32)
+            rh_index = np.array([float(rh.index_tip[0]), float(rh.index_tip[1])], dtype=np.float32)
+            rh_thumb = np.array([float(rh.thumb_tip[0]), float(rh.thumb_tip[1])], dtype=np.float32)
+
+            # Vector between the two hand centers
+            hand_dx = float(rh.palm_center[0] - lh.palm_center[0])
+            hand_dy = float(rh.palm_center[1] - lh.palm_center[1])
+            hand_dist = max(1.0, math.hypot(hand_dx, hand_dy))
+
+            # Perpendicular normal unit vector (for height orientation)
+            nx = -hand_dy / hand_dist
+            ny = hand_dx / hand_dist
+
+            # Left hand vertical span
+            lh_finger_dist = math.hypot(lh_index[0] - lh_thumb[0], lh_index[1] - lh_thumb[1])
+            lh_min_span = max(self.min_size_px, lh.hand_scale * 0.70)
+            if lh_finger_dist < lh_min_span:
+                # Pinching or close fingers: expand along perpendicular normal around pinch center
+                lh_mid = (lh_index + lh_thumb) * 0.5
+                lh_c0 = lh_mid - np.array([nx, ny], dtype=np.float32) * (lh_min_span * 0.5)
+                lh_c3 = lh_mid + np.array([nx, ny], dtype=np.float32) * (lh_min_span * 0.5)
+            else:
+                lh_c0 = lh_index
+                lh_c3 = lh_thumb
+
+            # Right hand vertical span
+            rh_finger_dist = math.hypot(rh_index[0] - rh_thumb[0], rh_index[1] - rh_thumb[1])
+            rh_min_span = max(self.min_size_px, rh.hand_scale * 0.70)
+            if rh_finger_dist < rh_min_span:
+                rh_mid = (rh_index + rh_thumb) * 0.5
+                rh_c1 = rh_mid - np.array([nx, ny], dtype=np.float32) * (rh_min_span * 0.5)
+                rh_c2 = rh_mid + np.array([nx, ny], dtype=np.float32) * (rh_min_span * 0.5)
+            else:
+                rh_c1 = rh_index
+                rh_c2 = rh_thumb
+
             raw_corners = [
-                [float(lh.index_tip[0]), float(lh.index_tip[1])],
-                [float(rh.index_tip[0]), float(rh.index_tip[1])],
-                [float(rh.thumb_tip[0]), float(rh.thumb_tip[1])],
-                [float(lh.thumb_tip[0]), float(lh.thumb_tip[1])]
+                [float(lh_c0[0]), float(lh_c0[1])],
+                [float(rh_c1[0]), float(rh_c1[1])],
+                [float(rh_c2[0]), float(rh_c2[1])],
+                [float(lh_c3[0]), float(lh_c3[1])]
             ]
 
-            # Sort 4 points into a convex clockwise quadrilateral starting from Top-Left
+            # Sort into convex clockwise quadrilateral starting from Top-Left
             sorted_quad = self._sort_convex_quadrilateral(raw_corners, h, w)
 
-            # Apply low-latency EMA smoothing
+            # Low-latency temporal EMA smoothing (responsive follow without lagging)
             if self.polygon_pts is not None:
                 self.polygon_pts = (
                     self.smoothing_alpha * sorted_quad +
@@ -103,19 +147,19 @@ class RegionController:
             return self.polygon_pts.astype(np.int32)
 
         else:
-            # Tracking Loss Handling: apply short grace period then fade out cleanly
+            # Tracking Loss: apply short grace period then fade out completely
             if self.polygon_pts is not None:
                 if self.tracking_loss_time is None:
                     self.tracking_loss_time = now
 
                 elapsed = now - self.tracking_loss_time
                 if elapsed < self.grace_period_sec:
-                    # Fade out smoothly over the grace period
+                    # Fade out smoothly over grace period
                     fade = max(0.0, 1.0 - (elapsed / self.grace_period_sec))
                     self.current_opacity = fade
                     return self.polygon_pts.astype(np.int32)
                 else:
-                    # Grace period expired: clear stale polygon so it never stays frozen
+                    # Grace period expired: clear stale polygon so it never stays stuck
                     self.polygon_pts = None
                     self.current_opacity = 0.0
                     return None
@@ -126,35 +170,26 @@ class RegionController:
     def _sort_convex_quadrilateral(self, pts: List[List[float]], h: int, w: int) -> np.ndarray:
         """
         Sorts 4 points into a clockwise convex quadrilateral starting at Top-Left.
-        Guarantees no self-intersection / bowtie twisting even when hands cross.
+        Prevents self-intersection, twisting, or bowtie distortion.
         """
         pts_arr = np.array(pts, dtype=np.float32)
 
-        # Enforce minimum vertical separation between index and thumb on each hand
-        dist_left = math.hypot(pts_arr[3][0] - pts_arr[0][0], pts_arr[3][1] - pts_arr[0][1])
-        if dist_left < 45.0:
-            pts_arr[3][1] = pts_arr[0][1] + 45.0
-
-        dist_right = math.hypot(pts_arr[2][0] - pts_arr[1][0], pts_arr[2][1] - pts_arr[1][1])
-        if dist_right < 45.0:
-            pts_arr[2][1] = pts_arr[1][1] + 45.0
-
-        # Sort clockwise around centroid
+        # Sort clockwise around centroid (computer graphics Y-down coordinate space)
         center = np.mean(pts_arr, axis=0)
         angles = np.arctan2(pts_arr[:, 1] - center[1], pts_arr[:, 0] - center[0])
         sorted_indices = np.argsort(angles)
         clockwise_pts = pts_arr[sorted_indices]
 
-        # Rotate array so the point closest to Top-Left (min x + y) is index 0
+        # Rotate array so point closest to Top-Left (min x + y) is index 0
         sum_xy = clockwise_pts[:, 0] + clockwise_pts[:, 1]
         top_left_idx = np.argmin(sum_xy)
         ordered_pts = np.roll(clockwise_pts, -top_left_idx, axis=0)
 
-        # Padding expansion so region comfortably frames the hands
-        padding_scale = 1.15
+        # Padding scale so region frames the control points comfortably
+        padding_scale = 1.12
         expanded = center + (ordered_pts - center) * padding_scale
 
-        # Clamp strictly inside frame boundaries
+        # Clamp strictly inside camera frame boundaries
         expanded[:, 0] = np.clip(expanded[:, 0], 2, w - 3)
         expanded[:, 1] = np.clip(expanded[:, 1], 2, h - 3)
 

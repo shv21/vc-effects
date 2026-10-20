@@ -11,7 +11,11 @@ Usage:
 import sys
 import os
 import subprocess
+import warnings
 from pathlib import Path
+
+# Suppress noisy deprecation warnings from third-party protobuf
+warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf")
 
 # Automatic venv delegation:
 # If user runs 'py main.py' or 'python main.py' without activating the venv,
@@ -24,8 +28,11 @@ if VENV_PYTHON.exists():
         current_exe = Path(sys.executable).resolve()
         target_exe = VENV_PYTHON.resolve()
         if current_exe != target_exe:
-            exit_code = subprocess.call([str(target_exe)] + sys.argv)
-            sys.exit(exit_code)
+            try:
+                exit_code = subprocess.call([str(target_exe)] + sys.argv)
+                sys.exit(exit_code)
+            except KeyboardInterrupt:
+                sys.exit(0)
     except Exception:
         pass
 
@@ -146,18 +153,31 @@ def main() -> None:
     print("\nPrimary Hands-Free Gestures:")
     print("  👋 Swipe Right / Left : Next / Previous Effect")
     print("  ✌️  Peace / V-Sign     : Cycle AR Mode (Mode A -> B -> C -> D)")
-    print("  ✊ Fist               : Toggle Freeze Region Position")
+    print("  🤏 Dual Pinch         : Continuous Precision Framing")
     print("  ✋ Open Palms         : Live Dynamic Follow")
     print("\nShortcuts:")
-    print("  [F11]   : Toggle Fullscreen")
-    print("  [D]     : Toggle Debug Telemetry")
-    print("  [Space] : Snapshot Photo")
-    print("  [R]     : Start/Stop Video Recording")
-    print("  [Esc]   : Exit\n")
+    print("  [F11 / F] : Toggle Fullscreen")
+    print("  [D]       : Toggle Debug Telemetry & Skeletons")
+    print("  [1 - 4]   : Jump directly to Mode A, B, C, or D")
+    print("  [M]       : Cycle Mode")
+    print("  [B]       : Next Background Scene")
+    print("  [C]       : Next Character Mask")
+    print("  [L]       : Toggle Lock / Freeze")
+    print("  [Space]   : Snapshot Photo")
+    print("  [R]       : Start/Stop Video Recording")
+    print("  [Esc]     : Exit\n")
 
-    app = ImmersiveARStudioApp(camera_index=args.camera, output_dir=args.output)
-    app.run()
+    try:
+        app = ImmersiveARStudioApp(camera_index=args.camera, output_dir=args.output)
+        app.run()
+    except KeyboardInterrupt:
+        print("\n[INFO] Studio closed cleanly.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[INFO] Studio closed cleanly.")
+        sys.exit(0)

@@ -4,7 +4,7 @@ Tracks 468 3D facial landmarks with MediaPipe Face Mesh:
 - Continuously calculates eye centers, face center, interpupillary scale, and head roll angle
 - Affine-warps and rotates transparent superhero masks and visors in real time
 - Keeps overlays locked to the user's face during head movement and rotation
-- Supports chest emblems anchored to upper torso
+- Supports Spider-Man masks, eye lenses, web overlays, iron hero faceplates, visors, and chest emblems
 """
 
 import math
@@ -36,8 +36,13 @@ IDX_RIGHT_EYE_OUTER = 263
 class CharacterCompositor:
     """Renders face masks, eye lenses, visors, and chest emblems tracking facial landmarks."""
 
-    def __init__(self, characters_dir: str = "assets/characters") -> None:
+    def __init__(
+        self,
+        characters_dir: str = "assets/characters",
+        filters_dir: str = "assets/filters"
+    ) -> None:
         self.characters_dir = Path(characters_dir)
+        self.filters_dir = Path(filters_dir)
         self.character_files: List[Path] = []
         self.cached_overlays: Dict[str, np.ndarray] = {}
         self.active_index: int = 0
@@ -64,19 +69,25 @@ class CharacterCompositor:
         self.reload()
 
     def reload(self) -> None:
-        """Discovers character assets in assets/characters/."""
+        """Discovers character assets in assets/characters/ and assets/filters/."""
         self.character_files.clear()
         self.cached_overlays.clear()
 
-        if self.characters_dir.exists():
-            for p in sorted(self.characters_dir.iterdir()):
-                if p.is_file() and p.suffix.lower() in [".png", ".webp"]:
-                    self.character_files.append(p)
+        discovered = {}
+        for folder in [self.characters_dir, self.filters_dir]:
+            if folder.exists():
+                for p in sorted(folder.iterdir()):
+                    if p.is_file() and p.suffix.lower() in [".png", ".webp"]:
+                        # Avoid duplicates by stem name
+                        if p.name not in discovered:
+                            discovered[p.name] = p
+
+        self.character_files = list(discovered.values())
 
         if self.active_index >= len(self.character_files):
             self.active_index = 0
 
-        logger.info(f"Loaded {len(self.character_files)} character overlays from {self.characters_dir}")
+        logger.info(f"Loaded {len(self.character_files)} character overlays into catalog")
 
     def get_current_character_name(self) -> str:
         if self.character_files:
@@ -99,7 +110,7 @@ class CharacterCompositor:
         self.is_enabled = not self.is_enabled
         return self.is_enabled
 
-    def composite(self, frame_bgr: np.ndarray) -> np.ndarray:
+    def composite(self, frame_bgr: np.ndarray, raw_frame_for_detection: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Extracts face landmarks and composites the active character overlay.
         The overlay continuously follows the face's position, scale, and head roll angle.
@@ -117,14 +128,14 @@ class CharacterCompositor:
         overlay = self.cached_overlays[char_path.name]
         h, w = frame_bgr.shape[:2]
 
-        # Extract Face Mesh landmarks
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        # Use raw camera frame if provided for pristine facial landmark detection
+        detect_src = raw_frame_for_detection if raw_frame_for_detection is not None else frame_bgr
+        frame_rgb = cv2.cvtColor(detect_src, cv2.COLOR_BGR2RGB)
         frame_rgb.flags.writeable = False
         results = self.face_mesh.process(frame_rgb)
         frame_rgb.flags.writeable = True
 
         if not results.multi_face_landmarks:
-            # Face not detected: return frame
             self.smoothed_center = None
             return frame_bgr
 
@@ -142,12 +153,14 @@ class CharacterCompositor:
         dy = right_eye[1] - left_eye[1]
         raw_eye_dist = max(10.0, float(math.hypot(dx, dy)))
 
-        # Head roll angle in degrees (tilt)
+        # Head roll angle in degrees (clockwise tilt in image space)
         raw_roll_deg = math.degrees(math.atan2(dy, dx))
 
         # Face center
         eyes_mid = ((left_eye[0] + right_eye[0]) / 2.0, (left_eye[1] + right_eye[1]) / 2.0)
         nose = pts[IDX_NOSE_TIP]
+        forehead = pts[IDX_FOREHEAD]
+        chin = pts[IDX_CHIN]
         raw_center = (float(eyes_mid[0] * 0.4 + nose[0] * 0.6), float(eyes_mid[1] * 0.4 + nose[1] * 0.6))
 
         # Apply low-latency EMA smoothing
@@ -170,24 +183,30 @@ class CharacterCompositor:
         if "emblem" in fname or "chest" in fname:
             # Chest emblem: projected down from chin along face vertical axis
             rad = math.radians(roll_deg + 90.0)
-            chin = pts[IDX_CHIN]
             emblem_cx = int(chin[0] + eye_dist * 1.5 * math.cos(rad))
             emblem_cy = int(chin[1] + eye_dist * 1.5 * math.sin(rad))
             target_w = int(eye_dist * 2.2)
             return self._render_rotated_overlay(frame_bgr, overlay, (emblem_cx, emblem_cy), target_w, -roll_deg)
 
+        elif "ear" in fname or "hat" in fname:
+            # Forehead accessory (e.g. cat ears)
+            rad = math.radians(roll_deg - 90.0)
+            ear_cx = int(forehead[0] + eye_dist * 0.45 * math.cos(rad))
+            ear_cy = int(forehead[1] + eye_dist * 0.45 * math.sin(rad))
+            target_w = int(eye_dist * 2.5)
+            return self._render_rotated_overlay(frame_bgr, overlay, (ear_cx, ear_cy), target_w, -roll_deg)
+
         elif "mask" in fname:
             # Full Face Mask: scaled to face width and height
-            target_w = int(eye_dist * 3.4)
-            # Offset slightly upward towards forehead
+            target_w = int(eye_dist * 2.65)
             rad = math.radians(roll_deg - 90.0)
-            mask_cx = int(cx + eye_dist * 0.15 * math.cos(rad))
-            mask_cy = int(cy + eye_dist * 0.15 * math.sin(rad))
+            mask_cx = int(cx + eye_dist * 0.10 * math.cos(rad))
+            mask_cy = int(cy + eye_dist * 0.10 * math.sin(rad))
             return self._render_rotated_overlay(frame_bgr, overlay, (mask_cx, mask_cy), target_w, -roll_deg)
 
         else:
-            # Eye lenses or Visor: anchored directly on eye midpoint
-            target_w = int(eye_dist * 2.6)
+            # Eye lenses, Glasses or Visor: anchored directly on eye midpoint
+            target_w = int(eye_dist * 2.30)
             eye_cx = int(eyes_mid[0])
             eye_cy = int(eyes_mid[1])
             return self._render_rotated_overlay(frame_bgr, overlay, (eye_cx, eye_cy), target_w, -roll_deg)
@@ -254,8 +273,8 @@ class CharacterCompositor:
 
         if crop_ov.shape[2] == 4:
             alpha = (crop_ov[:, :, 3].astype(np.float32) / 255.0)[:, :, np.newaxis]
-            rgb = crop_ov[:, :, :3].astype(np.float32)
-            blended = alpha * rgb + (1.0 - alpha) * crop_base.astype(np.float32)
+            rgb = crop_ov[:, :, :3]
+            blended = alpha * rgb.astype(np.float32) + (1.0 - alpha) * crop_base.astype(np.float32)
             frame_bgr[fy1:fy2, fx1:fx2] = np.clip(blended, 0, 255).astype(np.uint8)
 
         return frame_bgr

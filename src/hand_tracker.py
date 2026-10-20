@@ -4,10 +4,12 @@ Features:
 - Sub-pixel landmark detection with MediaPipe Hands
 - Distance-invariant normalized pinch detection
 - Velocity-adaptive EMA smoothing (zero lag during fast movement, jitter-free when stationary)
-- Screen-space geometric hand assignment (guarantees left/right spatial consistency)
+- Spatial continuity hand tracking to prevent left/right history cross-wiring
+- Accurate camera-space coordinate mapping
 """
 
 import math
+import time
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict
@@ -21,7 +23,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Key Landmark Indices
+# Key MediaPipe Hand Landmark Indices
 WRIST = 0
 THUMB_CMC = 1
 THUMB_MCP = 2
@@ -88,6 +90,7 @@ class DualHandData:
     both_hands_visible: bool = False
     inter_hand_distance: float = 0.0
     hands_midpoint: Tuple[int, int] = (0, 0)
+    is_dual_pinching: bool = False
 
 
 class HandTracker:
@@ -96,9 +99,9 @@ class HandTracker:
     def __init__(
         self,
         max_num_hands: int = 2,
-        min_detection_confidence: float = 0.6,
-        min_tracking_confidence: float = 0.5,
-        base_smoothing_alpha: float = 0.75
+        min_detection_confidence: float = 0.55,
+        min_tracking_confidence: float = 0.50,
+        base_smoothing_alpha: float = 0.78
     ) -> None:
         if mp is None:
             raise RuntimeError("MediaPipe is required. Please install mediapipe.")
@@ -112,61 +115,101 @@ class HandTracker:
         )
 
         self.base_smoothing_alpha = base_smoothing_alpha
-        self.smoothed_history: Dict[str, np.ndarray] = {}
+        # Spatial track continuity: track_id -> (last_seen_time, smoothed_landmarks)
+        self.active_tracks: Dict[int, Tuple[float, np.ndarray]] = {}
+        self.track_max_idle_sec: float = 0.35
 
     def process(self, frame_bgr: np.ndarray) -> DualHandData:
-        """Processes BGR frame and returns DualHandData."""
+        """Processes BGR frame in camera coordinates and returns DualHandData."""
         if frame_bgr is None or frame_bgr.size == 0:
             return DualHandData()
 
+        now = time.time()
         h, w = frame_bgr.shape[:2]
+
+        # Convert to RGB for MediaPipe
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         frame_rgb.flags.writeable = False
         results = self.hands_detector.process(frame_rgb)
         frame_rgb.flags.writeable = True
 
         dual = DualHandData()
+
+        # Clean up stale tracks
+        stale_tracks = [tid for tid, (t, _) in self.active_tracks.items() if now - t > self.track_max_idle_sec]
+        for tid in stale_tracks:
+            del self.active_tracks[tid]
+
         if not results.multi_hand_landmarks:
-            self.smoothed_history.clear()
             return dual
 
         raw_hands = []
         for lms in results.multi_hand_landmarks:
+            # Map normalized coordinates directly to camera-frame pixel dimensions
             pts_px = np.array([[lm.x * w, lm.y * h] for lm in lms.landmark], dtype=np.float32)
             raw_hands.append(pts_px)
 
-        # Sort hands horizontally by centroid X: left-most hand first, right-most second
-        raw_hands.sort(key=lambda pts: np.mean(pts[:, 0]))
+        # Associate detections to tracks using spatial distance
+        smoothed_hands = []
+        used_tracks = set()
+
+        for pts in raw_hands:
+            centroid = np.mean(pts, axis=0)
+            best_tid = None
+            best_dist = float("inf")
+
+            for tid, (t_seen, prev_pts) in self.active_tracks.items():
+                if tid in used_tracks:
+                    continue
+                prev_centroid = np.mean(prev_pts, axis=0)
+                d = float(np.linalg.norm(centroid - prev_centroid))
+                if d < best_dist and d < (w * 0.40):
+                    best_dist = d
+                    best_tid = tid
+
+            if best_tid is not None:
+                used_tracks.add(best_tid)
+                _, prev_pts = self.active_tracks[best_tid]
+                movement = float(np.mean(np.linalg.norm(pts - prev_pts, axis=1)))
+                # Adaptive alpha: 0.70 when still (smooth), up to 0.96 when moving rapidly (zero lag)
+                adaptive_alpha = min(0.96, max(0.70, self.base_smoothing_alpha + movement * 0.025))
+                smoothed = adaptive_alpha * pts + (1.0 - adaptive_alpha) * prev_pts
+                self.active_tracks[best_tid] = (now, smoothed)
+            else:
+                # New track
+                new_tid = 0 if 0 not in self.active_tracks else (1 if 1 not in self.active_tracks else len(self.active_tracks))
+                smoothed = pts.copy()
+                self.active_tracks[new_tid] = (now, smoothed)
+                used_tracks.add(new_tid)
+
+            smoothed_hands.append(smoothed)
+
+        if not smoothed_hands:
+            return dual
+
+        # Sort hands horizontally by centroid X for screen-space left/right consistency
+        smoothed_hands.sort(key=lambda pts: float(np.mean(pts[:, 0])))
 
         hand_objects = []
-        for idx, pts in enumerate(raw_hands):
-            label = "ScreenLeft" if (idx == 0 and len(raw_hands) > 1 or pts[0][0] < w * 0.5) else "ScreenRight"
-
-            # Velocity-adaptive smoothing: faster motion uses higher alpha (less lag)
-            if label in self.smoothed_history:
-                prev_pts = self.smoothed_history[label]
-                movement = float(np.mean(np.linalg.norm(pts - prev_pts, axis=1)))
-                # Dynamic alpha between 0.65 (still) and 0.95 (rapid motion)
-                adaptive_alpha = min(0.95, max(0.65, self.base_smoothing_alpha + movement * 0.02))
-                smoothed = adaptive_alpha * pts + (1.0 - adaptive_alpha) * prev_pts
-            else:
-                smoothed = pts.copy()
-
-            self.smoothed_history[label] = smoothed
-            hand_obj = self._build_hand_data(smoothed, label, h, w)
+        if len(smoothed_hands) == 1:
+            pts = smoothed_hands[0]
+            cx = float(np.mean(pts[:, 0]))
+            label = "ScreenLeft" if cx < w * 0.5 else "ScreenRight"
+            hand_obj = self._build_hand_data(pts, label, h, w)
             hand_objects.append(hand_obj)
-
-        if len(hand_objects) == 1:
-            h0 = hand_objects[0]
-            if h0.palm_center[0] < w * 0.5:
-                dual.left_hand = h0
+            if label == "ScreenLeft":
+                dual.left_hand = hand_obj
             else:
-                dual.right_hand = h0
-        elif len(hand_objects) >= 2:
-            dual.left_hand = hand_objects[0]
-            dual.right_hand = hand_objects[1]
+                dual.right_hand = hand_obj
+        else:
+            # First is ScreenLeft (smaller X), second is ScreenRight (larger X)
+            lh_obj = self._build_hand_data(smoothed_hands[0], "ScreenLeft", h, w)
+            rh_obj = self._build_hand_data(smoothed_hands[1], "ScreenRight", h, w)
+            hand_objects.extend([lh_obj, rh_obj])
+            dual.left_hand = lh_obj
+            dual.right_hand = rh_obj
 
-        dual.hands_count = (1 if dual.left_hand else 0) + (1 if dual.right_hand else 0)
+        dual.hands_count = len(hand_objects)
         dual.both_hands_visible = (dual.left_hand is not None and dual.right_hand is not None)
 
         if dual.both_hands_visible:
@@ -180,6 +223,7 @@ class HandTracker:
                 int((lh.palm_center[0] + rh.palm_center[0]) / 2),
                 int((lh.palm_center[1] + rh.palm_center[1]) / 2)
             )
+            dual.is_dual_pinching = bool(lh.is_pinching and rh.is_pinching)
 
         return dual
 
@@ -210,7 +254,7 @@ class HandTracker:
         # Distance-invariant pinch ratio
         pinch_dist = float(math.hypot(thumb_tip[0] - index_tip[0], thumb_tip[1] - index_tip[1]))
         pinch_ratio = pinch_dist / hand_scale
-        is_pinching = (pinch_ratio <= 0.35)  # Robust threshold across near & far hands
+        is_pinching = (pinch_ratio <= 0.38)
 
         # Finger extension classification
         def is_ext(tip_i: int, pip_i: int) -> bool:
@@ -261,7 +305,7 @@ class HandTracker:
         )
 
     def draw_debug_hands(self, frame_bgr: np.ndarray, dual: DualHandData) -> np.ndarray:
-        """Renders subtle, glowing hand skeletons for debug view only."""
+        """Renders subtle hand skeletons in debug mode only."""
         overlay = frame_bgr.copy()
         for hand in [dual.left_hand, dual.right_hand]:
             if hand is None:

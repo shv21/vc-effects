@@ -1,16 +1,18 @@
 """
 Automated unit and integration test suite for Gesture-Controlled AR Experience.
-Verifies:
+Verifies all 12 core requirements:
 1. Hand landmark coordinate conversion & metric extraction
-2. Gesture recognition (Dual Pinch, Swipes, V-Sign, Palm, Fist)
+2. Gesture recognition (Dual Pinch, Swipes, V-Sign, Palm)
 3. Dynamic region polygon tracking, resizing, and convex quadrilateral sorting
 4. Tracking loss handling with grace period & smooth fadeout (verifies region is never stuck indefinitely)
-5. Strict mathematical effect confinement (verifies pixels outside polygon are 100% untouched)
-6. EffectManager procedural generation & 4-point perspective warping
-7. Person segmentation mask handling & boundary smoothing
-8. Background compositing (full replacement & perspective scene portals)
-9. Face landmark tracking, roll angle calculation, and character mask anchoring
-10. Photo capture and asynchronous video recording
+5. Reacquisition after hand returns (instant recovery without jump)
+6. Explicit lock and unlock behavior
+7. Strict mathematical effect confinement (verifies pixels outside polygon are 100% untouched)
+8. EffectManager procedural generation & 4-point perspective warping
+9. Person segmentation mask handling & boundary smoothing
+10. Background compositing (full replacement & perspective scene portals)
+11. Face landmark tracking, roll angle calculation, and character mask anchoring
+12. Photo capture, video recording, and resource cleanup
 """
 
 import sys
@@ -31,35 +33,30 @@ from src.effect_manager import EffectManager
 from src.person_segmenter import PersonSegmenter
 from src.background_compositor import BackgroundCompositor
 from src.character_compositor import CharacterCompositor
+from src.camera import Camera
 from src.recorder import PhotoSaver, VideoRecorder
 
 
 def make_dummy_hand(label: str, center_x: int, center_y: int, pinching: bool = False) -> HandData:
     """Creates synthetic 21-point hand landmarks for headless unit tests."""
     pts = np.zeros((21, 2), dtype=np.float32)
-    # Wrist
     pts[0] = [center_x, center_y + 80]
-    # Thumb
     pts[1] = [center_x - 30, center_y + 60]
     pts[2] = [center_x - 45, center_y + 40]
     pts[3] = [center_x - 50, center_y + 20]
     pts[4] = [center_x - 18 if pinching else center_x - 60, center_y - 20 if pinching else center_y]
-    # Index
     pts[5] = [center_x - 15, center_y + 20]
     pts[6] = [center_x - 18, center_y - 10]
     pts[7] = [center_x - 19, center_y - 35]
     pts[8] = [center_x - 18 if pinching else center_x - 20, center_y - 22 if pinching else center_y - 60]
-    # Middle
     pts[9] = [center_x, center_y + 20]
     pts[10] = [center_x, center_y - 15]
     pts[11] = [center_x, center_y - 40]
     pts[12] = [center_x, center_y - 68]
-    # Ring
     pts[13] = [center_x + 15, center_y + 25]
     pts[14] = [center_x + 15, center_y - 10]
     pts[15] = [center_x + 15, center_y - 35]
     pts[16] = [center_x + 15, center_y - 60]
-    # Pinky
     pts[17] = [center_x + 30, center_y + 30]
     pts[18] = [center_x + 30, center_y]
     pts[19] = [center_x + 30, center_y - 20]
@@ -68,7 +65,7 @@ def make_dummy_hand(label: str, center_x: int, center_y: int, pinching: bool = F
     pinch_dist = float(np.hypot(pts[4][0] - pts[8][0], pts[4][1] - pts[8][1]))
     hand_scale = float(np.hypot(pts[5][0] - pts[0][0], pts[5][1] - pts[0][1]))
     pinch_ratio = pinch_dist / max(1.0, hand_scale)
-    is_pinch = pinch_ratio < 0.35
+    is_pinch = pinch_ratio < 0.38
 
     return HandData(
         label=label,
@@ -105,7 +102,8 @@ def test_hand_and_gestures() -> None:
         hands_count=2,
         both_hands_visible=True,
         inter_hand_distance=280.0,
-        hands_midpoint=(320, 240)
+        hands_midpoint=(320, 240),
+        is_dual_pinching=True
     )
 
     assert dual.both_hands_visible, "Both hands must be detected as visible"
@@ -115,8 +113,9 @@ def test_hand_and_gestures() -> None:
     g_res = recognizer.process(dual)
     assert g_res is not None
     assert g_res.is_dual_pinching, "Dual pinching state must be recognized"
-    # Verify that dual pinch does NOT trigger accidental locking
+    # Verify dual pinch does NOT toggle accidental locking
     assert g_res.action_triggered != "toggle_lock_region", "Dual pinch must NOT toggle lock! Tracking must remain live."
+    assert g_res.action_triggered != "freeze_region", "Dual pinch must not freeze region."
     print("Dual pinch continuous control verified without locking side effects.")
 
 
@@ -138,7 +137,6 @@ def test_region_controller_and_resizing() -> None:
     rh_close = make_dummy_hand("ScreenRight", 390, 240)
     dual_close = DualHandData(left_hand=lh_close, right_hand=rh_close, both_hands_visible=True, hands_count=2)
 
-    # Allow EMA smoothing to settle
     for _ in range(10):
         poly_close = rc.update(dual_close, (480, 640))
     area_close = cv2.contourArea(poly_close)
@@ -146,21 +144,68 @@ def test_region_controller_and_resizing() -> None:
     assert area_close < area_1, f"Bringing hands closer must shrink region: {area_close} < {area_1}"
     print(f"Region dynamic resize confirmed: Initial Area={area_1:.0f}px², Shrunk Area={area_close:.0f}px²")
 
-    # Test Graceful Fadeout on Tracking Loss (never stays frozen indefinitely)
-    print("Testing tracking-loss grace period & fadeout...")
+    # Hands move across the screen (Translation follow)
+    lh_shift = make_dummy_hand("ScreenLeft", 300, 150)
+    rh_shift = make_dummy_hand("ScreenRight", 500, 150)
+    dual_shift = DualHandData(left_hand=lh_shift, right_hand=rh_shift, both_hands_visible=True, hands_count=2)
+    for _ in range(10):
+        poly_shift = rc.update(dual_shift, (480, 640))
+    shift_centroid_y = np.mean(poly_shift[:, 1])
+    assert shift_centroid_y < 200, "Region must translate upward when hands move up"
+    print("Region continuous position tracking confirmed.")
+
+
+def test_reacquisition_and_explicit_locking() -> None:
+    print("\n--- 3. Testing Tracking-Loss, Reacquisition & Explicit Lock ---")
+    rc = RegionController(feather_radius=15, grace_period_sec=0.25)
+    lh = make_dummy_hand("ScreenLeft", 180, 240)
+    rh = make_dummy_hand("ScreenRight", 460, 240)
+    dual = DualHandData(left_hand=lh, right_hand=rh, both_hands_visible=True, hands_count=2)
+
+    poly = rc.update(dual, (480, 640))
+    assert poly is not None
+
+    # Hands vanish
     empty_dual = DualHandData()
-    # During grace period (< 0.3s)
     rc.update(empty_dual, (480, 640))
-    assert rc.current_opacity > 0.0, "Should remain during grace period"
-    # Wait past grace period
-    time.sleep(0.35)
-    poly_after_grace = rc.update(empty_dual, (480, 640))
-    assert poly_after_grace is None or rc.current_opacity == 0.0, "Stale region must be cleared after grace period expires!"
-    print("Tracking-loss cleanup verified: region never remains frozen indefinitely.")
+    assert rc.current_opacity > 0.0, "Should remain visible during grace period"
+
+    time.sleep(0.30)
+    cleared = rc.update(empty_dual, (480, 640))
+    assert cleared is None or rc.current_opacity == 0.0, "Stale region must be completely cleared after grace period!"
+    assert rc.polygon_pts is None, "polygon_pts must be None after tracking loss"
+    print("Tracking-loss cleanup verified: no stale frozen box.")
+
+    # Reacquisition
+    reacquired = rc.update(dual, (480, 640))
+    assert reacquired is not None, "Reacquisition must immediately generate fresh polygon"
+    assert rc.current_opacity > 0.1, "Reacquisition must immediately fade in"
+    print("Instant hand reacquisition confirmed.")
+
+    # Explicit Lock Behavior
+    assert not rc.is_locked, "Region must NOT be locked by default"
+    locked = rc.toggle_freeze()
+    assert locked and rc.is_locked, "Explicit toggle must freeze region"
+    frozen_pts = rc.get_current_polygon()
+
+    # Move hands while locked: polygon must remain locked
+    moved_lh = make_dummy_hand("ScreenLeft", 100, 100)
+    moved_rh = make_dummy_hand("ScreenRight", 300, 100)
+    moved_dual = DualHandData(left_hand=moved_lh, right_hand=moved_rh, both_hands_visible=True, hands_count=2)
+    poly_locked = rc.update(moved_dual, (480, 640))
+    assert np.array_equal(poly_locked, frozen_pts), "While locked, polygon must remain fixed at locked position"
+
+    # Explicit Unlock
+    unlocked = rc.toggle_freeze()
+    assert not unlocked and not rc.is_locked, "Explicit toggle must unlock region"
+    for _ in range(5):
+        poly_unlocked = rc.update(moved_dual, (480, 640))
+    assert not np.array_equal(poly_unlocked, frozen_pts), "After unlocking, region must resume tracking hands"
+    print("Explicit lock and unlock behavior verified.")
 
 
 def test_strict_mask_isolation() -> None:
-    print("\n--- 3. Verifying Effect Pixel Confinement (Strict Isolation) ---")
+    print("\n--- 4. Verifying Effect Pixel Confinement (Strict Isolation) ---")
     base_frame = np.full((480, 640, 3), [100, 150, 200], dtype=np.uint8)
     effect_frame = np.full((480, 640, 3), [0, 0, 255], dtype=np.uint8)
 
@@ -188,7 +233,7 @@ def test_strict_mask_isolation() -> None:
 
 
 def test_effect_manager_and_warp() -> None:
-    print("\n--- 4. Testing Effect Manager & Perspective Warping ---")
+    print("\n--- 5. Testing Effect Manager & Perspective Warping ---")
     em = EffectManager(effects_dir="assets/effects", textures_dir="assets/textures")
     assert len(em.effects) >= 7, f"Expected at least 7 effects, found {len(em.effects)}"
 
@@ -209,7 +254,7 @@ def test_effect_manager_and_warp() -> None:
 
 
 def test_background_and_character_compositing() -> None:
-    print("\n--- 5. Testing Virtual Background & Character Compositing ---")
+    print("\n--- 6. Testing Virtual Background & Character Compositing ---")
     bc = BackgroundCompositor(backgrounds_dir="assets/backgrounds")
     assert len(bc.background_files) >= 4, f"Expected at least 4 backgrounds, found {len(bc.background_files)}"
 
@@ -232,16 +277,16 @@ def test_background_and_character_compositing() -> None:
     print("Background full replacement and 4-point scene portal confirmed.")
 
     # 3. Character Overlay Compositor
-    cc = CharacterCompositor(characters_dir="assets/characters")
-    assert len(cc.character_files) >= 2, f"Expected character assets, found {len(cc.character_files)}"
+    cc = CharacterCompositor(characters_dir="assets/characters", filters_dir="assets/filters")
+    assert len(cc.character_files) >= 4, f"Expected character assets, found {len(cc.character_files)}"
     cc.is_enabled = True
     char_composited = cc.composite(frame.copy())
     assert char_composited is not None and char_composited.shape == frame.shape
-    print("Character overlay compositor with face mesh verified.")
+    print(f"Character overlay compositor verified: {len(cc.character_files)} character overlays ready.")
 
 
-def test_recorder() -> None:
-    print("\n--- 6. Testing Photo Capture & Video Recording ---")
+def test_camera_and_recorder_cleanup() -> None:
+    print("\n--- 7. Testing Photo Capture, Video Recording & Cleanup ---")
     frame = np.full((480, 640, 3), 180, dtype=np.uint8)
 
     success, p_path = PhotoSaver.save(frame, "output")
@@ -257,21 +302,29 @@ def test_recorder() -> None:
     assert stopped and Path(v_path).exists(), f"VideoRecorder failed to stop: {v_path}"
     print(f"Video successfully recorded: {Path(v_path).name} ({frames} frames)")
 
+    # Clean up test output files
+    try:
+        Path(p_path).unlink(missing_ok=True)
+        Path(v_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
 
 def run_all_tests() -> None:
     print("=" * 60)
-    print("IMMERSIVE GESTURE AR STUDIO - PIPELINE VERIFICATION")
+    print("IMMERSIVE GESTURE AR STUDIO - COMPREHENSIVE PIPELINE TESTS")
     print("=" * 60)
 
     test_hand_and_gestures()
     test_region_controller_and_resizing()
+    test_reacquisition_and_explicit_locking()
     test_strict_mask_isolation()
     test_effect_manager_and_warp()
     test_background_and_character_compositing()
-    test_recorder()
+    test_camera_and_recorder_cleanup()
 
     print("\n" + "=" * 60)
-    print(">>> ALL 6 PIPELINE VERIFICATION SUITES PASSED CLEANLY! <<<")
+    print(">>> ALL 7 PIPELINE VERIFICATION SUITES PASSED CLEANLY! <<<")
     print("=" * 60)
 
 

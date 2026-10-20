@@ -1,12 +1,11 @@
 """
 Upgraded gesture recognizer for hands-free AR control.
 Separates continuous spatial tracking from discrete action triggers.
-Eliminates accidental locking loops and ensures live tracking is always default.
-Actions:
-- Swipe Left / Right: Change visual effect
-- V-Sign / Peace (held 0.4s): Cycle Scene Mode (Mode A -> B -> C -> D)
-- Closed Fist (held 0.6s): Deliberate Freeze/Lock toggle
-- Open Palm: Instant release / unlock to live tracking
+Features:
+- Edge-triggered gesture latching: held gestures trigger once and require release before re-triggering
+- Prevents rapid mode overshooting while holding gestures
+- Debounced swipe detection for hands-free effect switching
+- Continuous live region control (never locks accidentally)
 """
 
 import time
@@ -37,8 +36,8 @@ class GestureRecognizer:
 
     def __init__(
         self,
-        cooldown_sec: float = 0.65,
-        swipe_velocity_min: float = 300.0,
+        cooldown_sec: float = 0.60,
+        swipe_velocity_min: float = 280.0,
         swipe_displacement_min: float = 65.0,
         hold_time_sec: float = 0.35
     ) -> None:
@@ -51,10 +50,11 @@ class GestureRecognizer:
         self.left_history: deque = deque(maxlen=10)
         self.right_history: deque = deque(maxlen=10)
 
-        # State tracking for debouncing
+        # State tracking for debouncing & edge-triggered latching
         self.last_action_time: float = 0.0
         self.candidate_action: Optional[str] = None
         self.candidate_first_seen: float = 0.0
+        self.latched_action: Optional[str] = None  # Prevents repeated triggering until gesture released
 
     def process(self, dual: DualHandData) -> GestureResult:
         """Analyzes dual hand metrics and returns recognized gesture and triggered action."""
@@ -73,6 +73,8 @@ class GestureRecognizer:
             self.right_history.clear()
 
         if not dual.both_hands_visible:
+            self.latched_action = None
+            self.candidate_action = None
             if dual.left_hand or dual.right_hand:
                 result.primary_gesture = "SINGLE_HAND"
                 result.description = "Show other hand to complete 4-corner region"
@@ -85,7 +87,7 @@ class GestureRecognizer:
         rh = dual.right_hand
 
         # Continuous status flags
-        result.is_dual_pinching = (lh.is_pinching and rh.is_pinching)
+        result.is_dual_pinching = bool(lh.is_pinching and rh.is_pinching)
         result.is_framing = True  # Both hands in view framing active region
 
         # 1. Dynamic Swipe Check (Priority for hands-free switching)
@@ -98,31 +100,25 @@ class GestureRecognizer:
             result.description = f"Hand Swipe: {'Next Effect ▶' if swipe_act == 'next_effect' else '◀ Previous Effect'}"
             return result
 
-        # 2. Static Gesture Classifications
+        # 2. Static Posture Classifications
         lh_g = self._classify_hand_posture(lh)
         rh_g = self._classify_hand_posture(rh)
 
-        # Check for deliberate mode switch (V-Sign held on either hand)
+        # Mode switch: V-Sign held on either hand (Edge-triggered: triggers ONCE per gesture presentation)
         if (lh_g == "V_SIGN" or rh_g == "V_SIGN") and not (lh.is_pinching or rh.is_pinching):
-            self._evaluate_held_action(now, "cycle_scene_mode", "✌️ Peace Sign: Change Scene Mode", result, hold_required=0.35)
+            self._evaluate_held_action(now, "cycle_scene_mode", "✌️ Peace Sign: Change Mode", result, hold_required=self.hold_time_sec)
             return result
+        else:
+            # Gesture released: clear latch so V-sign can be used again
+            if self.latched_action == "cycle_scene_mode":
+                self.latched_action = None
+                self.candidate_action = None
 
-        # Check for deliberate freeze (Closed Fist held on either hand)
-        if (lh_g == "FIST" or rh_g == "FIST") and not (lh.is_pinching or rh.is_pinching):
-            self._evaluate_held_action(now, "toggle_freeze", "✊ Fist: Freeze/Unfreeze Region", result, hold_required=0.50)
-            return result
-
-        # Open Palms (Unlock / Reset to live follow)
-        if lh_g == "OPEN_PALM" and rh_g == "OPEN_PALM":
-            result.primary_gesture = "OPEN_PALM"
-            result.description = "✋ Open Palms: Smooth Live Tracking"
-            result.action_triggered = "ensure_unlocked"
-            return result
-
-        # Dual Pinch: Active fine-sizing
+        # Dual Pinch: Active precision sizing
         if result.is_dual_pinching:
             result.primary_gesture = "DUAL_PINCH"
-            result.description = "🤏 Dual Pinch: Active Precision Sizing"
+            result.description = "🤏 Dual Pinch: Active Region Control"
+            self.candidate_action = None
             return result
 
         # Default continuous framing state
@@ -139,58 +135,76 @@ class GestureRecognizer:
         result: GestureResult,
         hold_required: float = 0.35
     ) -> None:
-        """Debounces deliberate gestures requiring a sustained posture."""
+        """Requires a gesture to be held continuously before triggering once (edge-triggered)."""
+        # If already triggered for this gesture hold, wait until release
+        if self.latched_action == action:
+            result.primary_gesture = f"{action.upper()} (TRIGGERED)"
+            result.description = f"Active: {desc} (Release to reset)"
+            return
+
+        if now - self.last_action_time < self.cooldown_sec:
+            result.primary_gesture = f"{action.upper()}_COOLDOWN"
+            return
+
         if self.candidate_action == action:
-            hold_time = now - self.candidate_first_seen
-            if hold_time >= hold_required and (now - self.last_action_time >= self.cooldown_sec):
+            elapsed = now - self.candidate_first_seen
+            if elapsed >= hold_required:
                 self.last_action_time = now
+                self.latched_action = action  # Latch until hand changes posture
                 self.candidate_action = None
                 result.action_triggered = action
                 result.primary_gesture = action.upper()
-                result.confidence = 1.0
-                result.description = f"{desc} [TRIGGERED]"
+                result.description = f"Triggered: {desc}"
+                logger.info(f"Gesture triggered: {action}")
             else:
-                result.primary_gesture = action.upper()
-                result.confidence = min(1.0, hold_time / hold_required)
-                result.description = f"{desc} (Hold {int(hold_time / hold_required * 100)}%)"
+                progress = int((elapsed / hold_required) * 100)
+                result.primary_gesture = f"HOLDING ({progress}%)"
+                result.description = f"Hold: {desc}"
         else:
             self.candidate_action = action
             self.candidate_first_seen = now
-            result.primary_gesture = action.upper()
-            result.description = desc
+            result.primary_gesture = "STARTING_GESTURE"
+            result.description = f"Hold: {desc}"
 
     def _classify_hand_posture(self, hand: HandData) -> str:
-        """Classifies static hand posture."""
-        f = hand.fingers_extended
-        thumb, index, middle, ring, pinky = f[0], f[1], f[2], f[3], f[4]
+        """Classifies hand shape into posture categories."""
+        ext = hand.fingers_extended
+        # ext: [thumb, index, middle, ring, pinky]
 
+        # V-Sign / Peace: Index + Middle extended, Ring + Pinky curled
+        if ext[1] and ext[2] and not ext[3] and not ext[4]:
+            return "V_SIGN"
+
+        # Open Palm: 4 or 5 fingers extended
+        if sum(ext) >= 4:
+            return "OPEN_PALM"
+
+        # Pinch
         if hand.is_pinching:
             return "PINCH"
-        if not index and not middle and not ring and not pinky:
-            return "FIST"
-        if index and middle and ring and pinky:
-            return "OPEN_PALM"
-        if index and middle and not ring and not pinky:
-            return "V_SIGN"
-        return "FRAME"
+
+        return "OTHER"
 
     def _check_swipe(self, now: float) -> Optional[str]:
-        """Detects high-velocity horizontal hand swipes."""
-        for buffer in [self.right_history, self.left_history]:
-            if len(buffer) < 4:
+        """Detects rapid horizontal hand velocity across recent frames."""
+        for hist in [self.right_history, self.left_history]:
+            if len(hist) < 4:
                 continue
 
-            t_old, x_old, _ = buffer[0]
-            t_new, x_new, _ = buffer[-1]
-            dt = t_new - t_old
+            dt = hist[-1][0] - hist[0][0]
+            if dt <= 0.05 or dt > 0.45:
+                continue
 
-            if 0.06 < dt < 0.30:
-                dx = x_new - x_old
-                velocity = dx / dt
-                if abs(velocity) >= self.swipe_velocity_min and abs(dx) >= self.swipe_displacement_min:
-                    buffer.clear()
-                    # dx > 0: hand moved towards right edge -> NEXT
-                    # dx < 0: hand moved towards left edge -> PREVIOUS
-                    return "next_effect" if dx > 0 else "prev_effect"
+            dx = hist[-1][1] - hist[0][1]
+            dy = hist[-1][2] - hist[0][2]
+
+            # Mostly horizontal motion
+            if abs(dx) < self.swipe_displacement_min or abs(dx) < abs(dy) * 1.5:
+                continue
+
+            velocity = abs(dx) / dt
+            if velocity >= self.swipe_velocity_min:
+                hist.clear()
+                return "next_effect" if dx > 0 else "prev_effect"
 
         return None
